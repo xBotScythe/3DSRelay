@@ -46,7 +46,7 @@ And the disguise is just paint. The app shows up as "FAT32 File System Diagnosti
 
 ### A poisoned update
 
-Updates spread device-to-device over the mesh, so in principle someone could try to feed you a malicious one. Every update is signed with a developer key whose public half is baked into the app, and a console checks both that signature and the payload's hash before installing anything. A forged or altered package gets rejected. The private signing key stays with the developer.
+Updates spread device-to-device over the main communication channel (UDS Channel 1, multiplexed with chat data), so in principle someone could try to feed you a malicious one. Every update is signed with a developer key whose public half is baked into the app, and a console checks both that signature and the payload's hash before installing anything. A forged or altered package gets rejected. The private signing key stays with the developer.
 
 ## Where it falls short
 - **It's not anonymous.** Traffic analysis is easy here, by design. If hiding *that* you communicate matters, this isn't the tool.
@@ -57,4 +57,8 @@ Updates spread device-to-device over the mesh, so in principle someone could try
 
 ## What's actually been tested
 
-A test suite runs on a normal computer (no 3DS needed) on every push, and covers the parts that don't depend on the hardware: the proof-of-work (including that relaying a packet doesn't break it and that tampering does), packet de-duplication, the hashing and compression, that every packet type is the same size on the wire, and that the encrypted storage round-trips and refuses a wrong key. The radio layer, the camera and QR scanning, and the on-device key handling can only really be checked on actual hardware.
+A test suite runs on a normal computer (no 3DS needed) on every push, and covers the parts that don't depend on the hardware: the proof-of-work (including that relaying a packet doesn't break it and that tampering does), packet de-duplication, the hashing and compression, that every packet type is the same size on the wire, and that the encrypted storage round-trips and refuses a wrong key.
+
+The test runner defaults to an animated multi-hop propagation proof that simulates a 3-device relay pipeline, verifying proof-of-work solving, TTL decrements, payload decompression, and loop/duplicate suppression on-screen with step-by-step delays. An interactive CLI testing mode is also available to run custom payloads and inject packet tampering to prove validation failures.
+
+The radio layer, the camera and QR scanning, and the on-device key handling can only really be checked on actual hardware.

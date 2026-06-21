@@ -57,7 +57,7 @@ If someone adds you first, a **Contact Request** screen shows their alias and fi
 
 ### Updates
 
-A device holding a newer signed package seeds it to nearby devices, which verify the signature and payload hash before installing through the system AM service. The app checks for a staged update at startup and via **Check for Updates** in settings. Transfers are batched and resumable: if the link drops mid-download, progress is saved and a later check continues from where it stopped.
+Updates are queried and transferred manually from nearby devices directly over the primary wireless link (Channel 1 UDS connection, multiplexed with chat data). This single-channel design avoids system prefetch abort crashes associated with secondary port binds. The client checks local SD versions first, downloading missing blocks only when a strictly newer update is available. Transfers are batched, resumable, and install automatically via AM services.
 
 ### Controls
 
@@ -108,7 +108,7 @@ Each packet carries a proof-of-work nonce whose SHA-256 hash must meet a difficu
 
 ### OTA updates
 
-`3DSRelay.update` is a signed manifest (version, payload size, SHA-256, Ed25519 signature) followed by the CIA payload. The downloader requests blocks in batches; the seeder streams them from one open handle, paced for the receive queue. A per-block bitmap is saved next to the partial file so an interrupted transfer resumes from the missing blocks, and the downloader re-acquires any peer advertising the same version and hash if the seeder drops. The wire format is unchanged, so a seeder still answers single-block requests from older peers.
+`3DSRelay.update` is a signed manifest (version, payload size, SHA-256, Ed25519 signature) followed by the CIA payload. Updates are multiplexed over the main UDS connection (Channel 1) alongside normal chat packets, eliminating the unstable Port 2 network bind to prevent system prefetch abort crashes. The downloader requests blocks in batches; the seeder streams them from one open handle, paced for the receive queue. A per-block bitmap is saved next to the partial file so an interrupted transfer resumes from the missing blocks.
 
 ### Persistence
 
@@ -123,7 +123,7 @@ This is a proof of concept, not a hardened secure messenger. Known limits:
 - **Not audited.** The cryptographic primitives are standard, but the surrounding protocol is custom and has had no external review.
 - **Metadata is exposed.** It is not anonymous. Anyone in range can observe ciphertext, ephemeral keys, packet timing, and the sender of a broadcast. Epidemic relaying makes traffic analysis easier, not harder.
 - **The unlock combo is weak.** It is a short button sequence with a small keyspace — a shoulder-surf/quick-lock deterrent, not a strong password. The 3-attempt RAM scrub limits online guessing but the secret itself is low-entropy.
-- **Contact exchange is trust-on-first-use.** The QR card is unsigned, so an attacker who controls what code you scan can substitute their own key. The fingerprint check is the only defence.
+- **Contact exchange is trust-on-first-use.** The QR card is signed, preventing raw tampering, but an attacker in physical range can still present their own signed card under your contact's alias. The fingerprint check is the only defense.
 - **The disguise is cosmetic.** The name and icon present as a disk tool and the UI uses diagnostic-sounding labels, but anyone who gets past the lock sees a messenger. It is not steganographic or undetectable.
 - **Rate limiting is light** (see above) and the PBKDF2 iteration count is modest for the hardware.
 - **No delivery guarantees.** Messages may never arrive if no path forms before they age out of the relay buffers.
@@ -140,21 +140,40 @@ make clean && make
 
 Pack a signed update:
 
-```
+```bash
 make update SIGNING_KEY=<private_key_hex>
 ```
 
 This reads the version from source and produces `3DSRelay.update`.
 
+### Distributing Your Own Updates
+
+Consoles will only accept updates signed by the private key matching the public key hardcoded in the application binary. If you are fork-building the project and want to distribute your own updates:
+
+1. Generate an Ed25519 keypair.
+2. Replace the public key hex values in the `dev_pk_sign` array inside [source/crypto_utils.cpp](file:///Users/noahg/Documents/3dschat/source/crypto_utils.cpp#L707) with your own public key.
+3. Build the application (`make`) and install the new `.cia` on the target consoles.
+4. Pack your updates using your private key:
+   ```bash
+   make update SIGNING_KEY=<your_private_key_hex>
+   ```
+
 ## Tests
 
 The device-independent protocol mechanics (proof-of-work, packet signatures and dedup, compression, hashing, traffic-size uniformity) build and run on a host with no 3DS toolchain:
 
-```
+```bash
 make -C tests test
 ```
 
-CI runs these on every push. They cover the wire logic only: the radio layer, camera/QR capture, and on-device key handling still need real hardware. See the [threat model](THREAT_MODEL.md) for what is and isn't covered.
+By default, this runs a step-by-step visual propagation proof, simulating a 3-device relay network with animated proof-of-work mining, TTL decrements, payload decompression, and loop prevention validation.
+
+You can also run in interactive mode to test custom payloads and toggle packet tampering:
+```bash
+make -C tests test ARGS="-i"
+```
+
+CI runs these tests on every push. They cover the wire logic only: the radio layer, camera/QR capture, and on-device key handling still need real hardware. See the [threat model](THREAT_MODEL.md) for what is and isn't covered.
 
 ## Development
 
