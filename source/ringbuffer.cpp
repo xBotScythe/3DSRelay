@@ -152,6 +152,7 @@ bool PacketRingBuffer::save_to_file(const char* filepath, const uint8_t enc_key[
     std::fwrite(cipher, 1, body, f);
     std::fflush(f);
     std::fclose(f);
+    std::remove(filepath);
     std::rename(tmp_path, filepath);
 
     std::memset(plain, 0, body);

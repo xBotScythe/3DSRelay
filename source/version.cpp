@@ -4,8 +4,8 @@
 #include "version.h"
 #include <cstdio>
 
-// v2.5.0 - encoding lives in version.h.
-const uint32_t CURRENT_APP_VERSION = 20500;
+// v2.5.1 - encoding lives in version.h.
+const uint32_t CURRENT_APP_VERSION = 20501;
 
 void format_app_version(uint32_t v, char* out, size_t n) {
     std::snprintf(out, n, "v%lu.%lu.%lu",

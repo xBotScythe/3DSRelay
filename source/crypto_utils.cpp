@@ -568,6 +568,7 @@ bool save_contacts_to_file() {
     std::fwrite(ciphertext, body, 1, f);
     std::fflush(f);
     std::fclose(f);
+    std::remove(CONTACTS_FILE_PATH);
     std::rename(CONTACTS_FILE_PATH ".tmp", CONTACTS_FILE_PATH);
 
     std::memset(plaintext, 0, sizeof(plaintext));

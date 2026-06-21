@@ -31,6 +31,7 @@ void save_config(const config_t& cfg) {
         std::fwrite(&disk_copy, sizeof(config_t), 1, f);
         std::fflush(f);
         std::fclose(f);
+        std::remove(CONFIG_FILE_PATH);
         std::rename(CONFIG_FILE_PATH ".tmp", CONFIG_FILE_PATH);
     }
     std::memset(&disk_copy, 0, sizeof(disk_copy));
