@@ -19,6 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: install makerom
+        run: |
+          apt-get update && apt-get install -y wget
+          wget -q https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip -O makerom.zip
+          unzip -q makerom.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/makerom
+
       - name: build cia
         run: make
 
