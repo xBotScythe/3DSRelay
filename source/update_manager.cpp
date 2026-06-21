@@ -180,8 +180,8 @@ bool process_local_update_file(const char* update_path, C2D_TextBuf text_buf, C3
     return true;
 }
 
-// resume sidecar files: a partial package and a per-block received bitmap so a
-// dropped or cancelled transfer continues instead of restarting all blocks
+// resume sidecars: a partial package and a per-block bitmap so a dropped
+// transfer continues instead of restarting
 #define UPDATE_PART_PATH   "sdmc:/3ds/3DSRelay.update.part"
 #define UPDATE_BITMAP_PATH "sdmc:/3ds/3DSRelay.update.bitmap"
 
@@ -196,8 +196,7 @@ struct resume_header_t {
 static inline void bitmap_mark(uint8_t* bm, uint32_t i) { bm[i >> 3] |= (uint8_t)(1u << (i & 7)); }
 static inline bool bitmap_get(const uint8_t* bm, uint32_t i) { return (bm[i >> 3] >> (i & 7)) & 1u; }
 
-// load a saved bitmap only when its header matches the advertised manifest and a
-// matching partial file is present; returns false to force a fresh download
+// load a saved bitmap only when its header and partial file match the manifest
 static bool load_resume_state(const update_manifest_t& manifest, uint32_t total_blocks, uint8_t* bitmap, size_t bitmap_bytes) {
     FILE* bf = std::fopen(UPDATE_BITMAP_PATH, "rb");
     if (!bf) return false;
@@ -231,8 +230,7 @@ static void save_resume_state(const update_manifest_t& manifest, uint32_t total_
     std::fclose(bf);
 }
 
-// broadcast a manifest query and wait for any newer-version reply; returns the
-// responding node so the transfer can re-acquire a peer after a drop
+// query for a newer-version reply, returning the responding node
 static bool query_mesh_manifest(NativeNetworkLink& link, update_manifest_t& out_manifest, u16& out_provider, u64 timeout_ms) {
     update_packet_t query;
     std::memset(&query, 0, sizeof(update_packet_t));
@@ -267,10 +265,8 @@ static bool query_mesh_manifest(NativeNetworkLink& link, update_manifest_t& out_
     return false;
 }
 
-// windowed + resumable download: requests a window of blocks per round trip,
-// writes them out of order at their offsets, tracks a bitmap, and re-acquires a
-// peer when the link stalls. falls back to legacy single-block requests so old
-// seeders still serve. keeps the partial on cancel/failure for later resume.
+// windowed, resumable download: tracks a bitmap, re-acquires a peer on stall,
+// falls back to single-block for old seeders, keeps the partial for resume
 static bool download_update_windowed(NativeNetworkLink& link, update_manifest_t manifest, u16 provider_node, C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target) {
     size_t total_size = 108 + (size_t)manifest.file_size;
     uint32_t total_blocks = (uint32_t)((total_size + UPDATE_BLOCK_SIZE - 1) / UPDATE_BLOCK_SIZE);
@@ -510,8 +506,7 @@ void serve_mesh_update_requests(NativeNetworkLink& link) {
             tx_update.length = (uint32_t)read_bytes;
             udsSendTo(src_node, 1, UDS_SENDFLAG_Default, &tx_update, sizeof(update_packet_t));
         } else {
-            // batch request: stream a contiguous window from one open handle, paced so a
-            // slow receiver and the 50-packet recv queue are not overrun
+            // batch request: stream a window from one open handle, paced for the recv queue
             uint32_t start = rx_update.block_index;
             uint32_t count = rx_update.length;
             if (count == 0 || count > UPDATE_WINDOW_BLOCKS) {

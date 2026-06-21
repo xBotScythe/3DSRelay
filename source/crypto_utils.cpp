@@ -547,7 +547,7 @@ const uint8_t dev_pk_sign[32] = {
     0xfe, 0x6d, 0x93, 0xda, 0xe8, 0x61, 0x39, 0x0f, 0x8d, 0xc5, 0x71, 0xda, 0x91, 0xf9, 0x0f, 0x4d
 };
 
-const uint32_t CURRENT_APP_VERSION = 211; // v2.1.1
+const uint32_t CURRENT_APP_VERSION = 212; // v2.1.2
 
 bool verify_update_manifest(const update_manifest_t& manifest) {
     if (manifest.magic != 0x55504434) {

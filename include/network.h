@@ -37,10 +37,9 @@ struct update_packet_t {
 };
 #pragma pack(pop)
 
-// payload bytes carried per data block; wire format kept stable for cross-version transfers
+// payload bytes per data block; wire format stays stable across versions
 static const uint32_t UPDATE_BLOCK_SIZE = 480;
-// blocks a seeder streams per batch request; kept small so a burst stays well under
-// the 50-packet recv queue while the client drains in the same loop
+// blocks streamed per batch request; small to fit under the 50-packet recv queue
 static const uint32_t UPDATE_WINDOW_BLOCKS = 16;
 
 

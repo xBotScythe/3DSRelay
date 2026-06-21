@@ -65,9 +65,7 @@ struct mining_task_t {
 
 static mining_task_t active_mining_task = { false, {}, 0, 8 };
 
-// outbound handshakes waiting for the single pow miner to free up; only one
-// packet mines at a time, so scans, resends and accepts queue here instead of
-// being dropped
+// outbound handshakes queued for the single pow miner
 static uint8_t handshake_queue[8][32];
 static int handshake_queue_len = 0;
 
@@ -162,6 +160,9 @@ int main(int argc, char* argv[]) {
     int app_state = 0; // 0 = main menu, 1 = pattern setup, 2 = settings, 3 = show pk, 4 = select recipient, 5 = add contact, 6 = incoming request
     u64 last_handshake_resend = 0;
     const u64 HANDSHAKE_RESEND_MS = 8000;
+    // cap resends so a one-sided add stops mining handshakes
+    int handshake_attempts[5] = {0};
+    const int HANDSHAKE_MAX_ATTEMPTS = 12;
     int temp_selected_idx = 0;
     
     uint32_t temp_seq[16];
@@ -508,7 +509,7 @@ int main(int argc, char* argv[]) {
                             if (std::strlen(key_hex) >= 64) {
                                 const char* alias = scanned_alias[0] ? scanned_alias : "Unknown";
                                 if (add_contact_record(alias, key_hex)) {
-                                    // pending until the peer also adds us and a handshake arrives back
+                                    // pending until the peer reciprocates
                                     uint8_t target_pk[32];
                                     hex_to_bytes(key_hex, target_pk, 32);
                                     enqueue_handshake(target_pk);
@@ -530,7 +531,7 @@ int main(int argc, char* argv[]) {
 
                             if (pk_btn == SWKBD_BUTTON_RIGHT) {
                                 if (add_contact_record(name_buf, pk_hex_buf)) {
-                                    // pending until the peer also adds us and a handshake arrives back
+                                    // pending until the peer reciprocates
                                     uint8_t target_pk[32];
                                     hex_to_bytes(pk_hex_buf, target_pk, 32);
                                     enqueue_handshake(target_pk);
@@ -611,16 +612,15 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                             if (found_idx >= 0) {
-                                // reciprocal handshake from a contact we already added: mutual
-                                // consent is reached, confirm and reciprocate (never touch alias)
+                                // known contact: confirm once and reciprocate; ignore once
+                                // confirmed so handshakes stop instead of ping-ponging
                                 if (!contact_list[found_idx].confirmed) {
                                     contact_list[found_idx].confirmed = true;
                                     save_contacts_to_file();
+                                    enqueue_handshake(handshake_pk);
                                 }
-                                enqueue_handshake(handshake_pk); // ensure the peer confirms us too
                             } else {
-                                // unsolicited handshake: do not register. queue it for the user
-                                // to accept or reject, deduping against pending requests
+                                // unsolicited: queue for accept/reject, dedup against pending
                                 bool dup = false;
                                 for (int ri = 0; ri < incoming_request_count; ++ri) {
                                     if (std::memcmp(incoming_requests[ri].pk_box, handshake_pk, 32) == 0) {
@@ -685,15 +685,15 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // periodically resend handshakes to unconfirmed contacts so scan order and
-        // packet loss do not stall mutual confirmation
+        // resend to unconfirmed contacts so scan order and loss don't stall confirm
         if (system_unlocked && keys_derived) {
             u64 now_hs = osGetTime();
             if (now_hs - last_handshake_resend >= HANDSHAKE_RESEND_MS) {
                 last_handshake_resend = now_hs;
                 for (int ci = 0; ci < contact_count; ++ci) {
-                    if (contact_list[ci].active && !contact_list[ci].confirmed) {
+                    if (contact_list[ci].active && !contact_list[ci].confirmed && handshake_attempts[ci] < HANDSHAKE_MAX_ATTEMPTS) {
                         enqueue_handshake(contact_list[ci].pk_box);
+                        handshake_attempts[ci]++;
                     }
                 }
             }
