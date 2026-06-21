@@ -1,0 +1,49 @@
+BasicInfo:
+  Title: "FAT32Diag"
+  CompanyCode: "00"
+  ProductCode: "CTR-P-RELAY"
+  ContentType: Application
+  Logo: Nintendo
+
+TitleInfo:
+  UniqueId: 0xF8100
+  Category: Application
+
+Option:
+  UseOnSD: true
+  EnableCompress: true
+  FreeProductCode: true
+  EnableCrypt: false
+
+AccessControlInfo:
+  CoreVersion: 2
+  DescVersion: 2
+  ReleaseKernelMajor: "02"
+  ReleaseKernelMinor: "33"
+  IdealProcessor: 0
+  AffinityMask: 1
+  Priority: 16
+  MaxCpu: 0x9E
+  DisableDebug: false
+  EnableForceDebug: false
+  CanWriteSharedPage: true
+  CanUseNonAlphabetAndNumber: true
+  FileSystemAccess:
+    - CategorySystemApplication
+    - CategoryHardwareCheck
+  ServiceAccessControl:
+    - APT:U
+    - fs:USER
+    - nwm:UDS
+    - ndm:u
+    - cfg:u
+    - act:u
+    - gsp::Lcd
+    - hid:USER
+    - cam:u
+    - soc:U
+    - am:app
+
+SystemControlInfo:
+  SaveDataSize: 128K
+  StackSize: 0x40000

@@ -1,0 +1,39 @@
+# build artifacts
+build/
+*.3dsx
+*.elf
+*.smdh
+*.map
+*.cia
+*.o
+*.d
+
+# runtime
+*.cfg
+.3ds_ip
+
+# update packages and keys
+*.update
+*.bin
+*.key
+*.priv
+*.pem
+*private*
+*secret*
+*keypair*
+
+# personal notes
+documentation.md
+docs/
+
+# system
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*~
