@@ -491,7 +491,7 @@ int main(int argc, char* argv[]) {
                     if (selected_menu_item == 0) {
                         // scan qr contact card (format: 3DSR1:<alias>:<pk_hex>)
                         char card_buf[96] = "";
-                        if (run_qr_contact_scan(text_buf, bottom_target, card_buf, sizeof(card_buf))) {
+                        if (run_qr_contact_scan(link, text_buf, bottom_target, card_buf, sizeof(card_buf))) {
                             char scanned_alias[16] = "";
                             const char* key_hex = card_buf;
                             if (std::strncmp(card_buf, "3DSR1:", 6) == 0) {

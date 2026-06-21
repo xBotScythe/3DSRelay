@@ -8,7 +8,10 @@
 #include <citro2d.h>
 #include <stddef.h>
 
-// scans outer camera frames for a 3dsr1 contact card payload
-bool run_qr_contact_scan(C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, char* card_out, size_t card_out_len);
+class NativeNetworkLink;
+
+// scans outer camera frames for a 3dsr1 contact card payload; the mesh link is
+// pumped during scanning so the uds connection is not torn down mid-scan
+bool run_qr_contact_scan(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, char* card_out, size_t card_out_len);
 
 #endif

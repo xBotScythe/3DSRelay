@@ -3,6 +3,7 @@
 
 #include "qr_scan.h"
 #include "ui_rendering.h"
+#include "network_impl.h"
 #include "quirc/quirc.h"
 #include <cstdlib>
 #include <cstdio>
@@ -372,7 +373,7 @@ static void exit_qr_scan(qr_scan_state* data) {
     data->event_stop = 0;
 }
 
-bool run_qr_contact_scan(C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, char* card_out, size_t card_out_len) {
+bool run_qr_contact_scan(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, char* card_out, size_t card_out_len) {
     if (!card_out || card_out_len < 71) {
         return false;
     }
@@ -409,6 +410,9 @@ bool run_qr_contact_scan(C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, 
             if (hidKeysDown() & KEY_B) {
                 break;
             }
+            // keep the mesh serviced so the link is not dropped while waiting
+            packet_t pump;
+            link.receive(pump);
             svcSleepThread(50 * 1000 * 1000ULL);
         }
 
@@ -447,6 +451,9 @@ bool run_qr_contact_scan(C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, 
                 // keep debug message from qr decode
             }
 
+            // keep the mesh serviced so the link survives a long scan session
+            packet_t pump;
+            link.receive(pump);
             svcSleepThread(50 * 1000 * 1000ULL);
         }
     }

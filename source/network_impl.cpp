@@ -221,7 +221,15 @@ void NativeNetworkLink::update_mesh_state() {
         udsConnectionStatus status;
         Result res = udsGetConnectionStatus(&status);
 
-        if (R_FAILED(res)) {
+        // a connected client should see the host plus itself; on a client the
+        // status call often keeps succeeding after the host vanishes, so treat
+        // being the only node as a dead link that must re-scan
+        bool healthy = R_SUCCEEDED(res);
+        if (healthy && !is_hosting_ && status.total_nodes <= 1) {
+            healthy = false;
+        }
+
+        if (!healthy) {
             disconnect_strikes_++;
         } else {
             disconnect_strikes_ = 0;
