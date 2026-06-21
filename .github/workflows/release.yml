@@ -31,7 +31,7 @@ jobs:
 
       - name: install signing dependencies
         if: startsWith(github.ref, 'refs/tags/v')
-        run: apt-get install -y python3-pip && pip3 install cryptography
+        run: apt-get install -y python3-cryptography
 
       - name: pack signed update
         if: startsWith(github.ref, 'refs/tags/v')
