@@ -10,8 +10,8 @@ The app is disguised as a FAT32 disk diagnostics tool.
 
 ### Install
 
-1. Copy `3DSRelay.cia` to the SD card.
-2. Install it with FBI or your preferred CIA installer.
+1. Copy `3DSRelay.cia` to the SD card and install it with FBI or your preferred CIA installer.
+2. Copy the signed update package `3DSRelay.update` to the `/3ds` folder on the SD card (i.e., `sdmc:/3ds/3DSRelay.update`). Placing it here allows the console to serve/seed the update package to other nearby devices over the local mesh network.
 3. It shows up on the Home Menu as **FAT32 File System Diagnostics**.
 
 ### Unlock and set up identity

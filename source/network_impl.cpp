@@ -6,6 +6,15 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstdio>
+#include <deque>
+
+namespace {
+    struct QueuedUpdatePacket {
+        update_packet_t packet;
+        u16 src_node;
+    };
+    static std::deque<QueuedUpdatePacket> update_packet_queue;
+}
 
 
 NativeNetworkLink::NativeNetworkLink() : uds_active_(false), is_hosting_(false), is_connected_(false), wlan_comm_id_(0x48425710) {
@@ -68,13 +77,53 @@ bool NativeNetworkLink::receive(packet_t& output_packet) {
         return false;
     }
 
-    size_t actual_size = 0;
-    u16 src_node = 0;
-    Result res = udsPullPacket(&bind_ctx_, &output_packet, sizeof(packet_t), &actual_size, &src_node);
-    if (R_SUCCEEDED(res) && actual_size == sizeof(packet_t)) {
-        return true;
+    uint8_t temp_buf[2048];
+    while (true) {
+        size_t actual_size = 0;
+        u16 src_node = 0;
+        Result res = udsPullPacket(&bind_ctx_, temp_buf, sizeof(temp_buf), &actual_size, &src_node);
+        if (R_FAILED(res) || actual_size == 0) {
+            break;
+        }
+
+        if (actual_size == sizeof(packet_t)) {
+            std::memcpy(&output_packet, temp_buf, sizeof(packet_t));
+            return true;
+        } else if (actual_size == sizeof(update_packet_t)) {
+            update_packet_t up_packet;
+            std::memcpy(&up_packet, temp_buf, sizeof(update_packet_t));
+            push_update_packet(up_packet, src_node);
+        }
     }
     return false;
+}
+
+Result NativeNetworkLink::receive_raw(void* buf, size_t size, size_t* actual_size, u16* src_node) {
+    if (!uds_active_ || !is_connected_) {
+        return -1;
+    }
+    return udsPullPacket(&bind_ctx_, buf, size, actual_size, src_node);
+}
+
+bool NativeNetworkLink::check_and_pop_update_packet(update_packet_t& out_packet, u16& out_src_node) {
+    if (update_packet_queue.empty()) {
+        return false;
+    }
+    QueuedUpdatePacket qp = update_packet_queue.front();
+    update_packet_queue.pop_front();
+    out_packet = qp.packet;
+    out_src_node = qp.src_node;
+    return true;
+}
+
+void NativeNetworkLink::push_update_packet(const update_packet_t& packet, u16 src_node) {
+    if (update_packet_queue.size() > 50) {
+        update_packet_queue.pop_front();
+    }
+    QueuedUpdatePacket qp;
+    qp.packet = packet;
+    qp.src_node = src_node;
+    update_packet_queue.push_back(qp);
 }
 
 void NativeNetworkLink::shutdown() {

@@ -18,10 +18,20 @@ struct contact_t {
 };
 #pragma pack(pop)
 
+// pending unsolicited handshake awaiting accept/reject; ram-only
+struct incoming_request_t {
+    char alias[16];
+    uint8_t pk_box[32];
+};
+
 // contact list globals
 extern contact_t contact_list[5];
 extern int contact_count;
 extern int selected_contact_idx;
+
+// inbound handshake requests pending the user's decision
+extern incoming_request_t incoming_requests[5];
+extern int incoming_request_count;
 
 // runtime derived keys held in ram
 extern uint8_t static_pk_sign[32];

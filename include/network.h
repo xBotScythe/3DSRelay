@@ -30,12 +30,18 @@ struct update_manifest_t {
 };
 
 struct update_packet_t {
-    uint8_t type;         // 0 = request block, 1 = data block, 2 = cancel/eof
+    uint8_t type;         // 0 = request block, 1 = data block, 2 = cancel/eof, 3 = batch request (block_index=start, length=count)
     uint32_t block_index;
     uint32_t length;
-    uint8_t payload[512];
+    uint8_t payload[480];
 };
 #pragma pack(pop)
+
+// payload bytes carried per data block; wire format kept stable for cross-version transfers
+static const uint32_t UPDATE_BLOCK_SIZE = 480;
+// blocks a seeder streams per batch request; kept small so a burst stays well under
+// the 50-packet recv queue while the client drains in the same loop
+static const uint32_t UPDATE_WINDOW_BLOCKS = 16;
 
 
 class NetworkLink {

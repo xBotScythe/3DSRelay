@@ -118,7 +118,7 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
                     if (p.ver == 1) {
                         dec_success = decrypt_message_packet(p, plaintext, sizeof(plaintext), sender_alias, sizeof(sender_alias), static_sk_box);
                         if (dec_success) {
-                            std::snprintf(display_str, sizeof(display_str), "%s: %s", sender_alias, plaintext);
+                            std::snprintf(display_str, sizeof(display_str), "%.31s: %.90s", sender_alias, plaintext);
                         }
                     } else if (p.ver == 2) {
                         uint8_t handshake_pk[32];
@@ -151,7 +151,7 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
                                 }
                             }
                             if (contact_idx != -1) {
-                                std::snprintf(display_str, sizeof(display_str), "%s [Broadcast]: %s", contact_list[contact_idx].alias, plaintext);
+                                std::snprintf(display_str, sizeof(display_str), "%.15s [Broadcast]: %.90s", contact_list[contact_idx].alias, plaintext);
                             } else {
                                 bool name_exists = false;
                                 for (int ci = 0; ci < contact_count; ++ci) {
@@ -162,9 +162,9 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
                                 }
                                 if (name_exists) {
                                     std::string fp = public_key_fingerprint(sender_pk_box);
-                                    std::snprintf(display_str, sizeof(display_str), "%s_%.4s [BC]: %s", sender_alias, fp.c_str(), plaintext);
+                                    std::snprintf(display_str, sizeof(display_str), "%.31s_%.4s [BC]: %.84s", sender_alias, fp.c_str(), plaintext);
                                 } else {
-                                    std::snprintf(display_str, sizeof(display_str), "%s [BC]: %s", sender_alias, plaintext);
+                                    std::snprintf(display_str, sizeof(display_str), "%.31s [BC]: %.89s", sender_alias, plaintext);
                                 }
                             }
                         }
@@ -258,8 +258,8 @@ void draw_bottom_screen_menu(C2D_TextBuf text_buf, int selected_item) {
 
     // dynamic compose label displays target contact alias if recipient selected
     char send_label[64];
-    std::snprintf(send_label, sizeof(send_label), "Compose Private Msg (%s)", 
-                 (contact_list[selected_contact_idx].active) ? contact_list[selected_contact_idx].alias : "none");
+    std::snprintf(send_label, sizeof(send_label), "Compose Private Msg (%s)",
+                 (contact_list[selected_contact_idx].active && contact_list[selected_contact_idx].confirmed) ? contact_list[selected_contact_idx].alias : "none");
 
     const char* menu_items[6];
     menu_items[0] = send_label;
@@ -451,6 +451,27 @@ void draw_bottom_screen_select_recipient(C2D_TextBuf text_buf, int temp_selected
 
     C2D_DrawRectSolid(0, 208, 0.5f, 320, 32, C2D_Color32(26, 27, 38, 255));
     draw_text(text_buf, "A: Select, B: Back", 12, 214, 0.42f, C2D_Color32(255, 255, 255, 255));
+}
+
+void draw_bottom_screen_incoming_request(C2D_TextBuf text_buf, const char* alias, const char* fingerprint) {
+    C2D_DrawRectSolid(0, 0, 0.5f, 320, 28, C2D_Color32(26, 27, 38, 255));
+    draw_text(text_buf, "Contact Request", 12, 6, 0.55f, C2D_Color32(0, 255, 210, 255));
+    C2D_DrawRectSolid(0, 28, 0.5f, 320, 1, C2D_Color32(0, 255, 210, 80));
+
+    draw_text(text_buf, "Wants to connect:", 12, 44, 0.42f, C2D_Color32(255, 255, 255, 255));
+
+    char alias_line[40];
+    std::snprintf(alias_line, sizeof(alias_line), "%.16s", (alias && alias[0]) ? alias : "Unknown");
+    draw_text(text_buf, alias_line, 20, 70, 0.62f, C2D_Color32(250, 200, 50, 255));
+
+    draw_text(text_buf, "Fingerprint", 12, 110, 0.36f, C2D_Color32(154, 160, 166, 255));
+    draw_text(text_buf, (fingerprint && fingerprint[0]) ? fingerprint : "-", 12, 126, 0.42f, C2D_Color32(0, 255, 210, 255));
+
+    draw_text(text_buf, "Verify the fingerprint matches in person.", 12, 158, 0.34f, C2D_Color32(154, 160, 166, 255));
+    draw_text(text_buf, "Only confirmed contacts can message.", 12, 174, 0.34f, C2D_Color32(154, 160, 166, 255));
+
+    C2D_DrawRectSolid(0, 208, 0.5f, 320, 32, C2D_Color32(26, 27, 38, 255));
+    draw_text(text_buf, "A: Accept   B: Reject", 12, 214, 0.42f, C2D_Color32(255, 255, 255, 255));
 }
 
 void draw_bottom_screen_pattern_setup(C2D_TextBuf text_buf, const uint32_t* temp_seq, size_t temp_len) {

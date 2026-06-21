@@ -65,6 +65,23 @@ struct mining_task_t {
 
 static mining_task_t active_mining_task = { false, {}, 0, 8 };
 
+// outbound handshakes waiting for the single pow miner to free up; only one
+// packet mines at a time, so scans, resends and accepts queue here instead of
+// being dropped
+static uint8_t handshake_queue[8][32];
+static int handshake_queue_len = 0;
+
+static void enqueue_handshake(const uint8_t pk[32]) {
+    for (int i = 0; i < handshake_queue_len; ++i) {
+        if (std::memcmp(handshake_queue[i], pk, 32) == 0) {
+            return;
+        }
+    }
+    if (handshake_queue_len < 8) {
+        std::memcpy(handshake_queue[handshake_queue_len++], pk, 32);
+    }
+}
+
 static void send_handshake_to_contact(const uint8_t recipient_pk[32], uint32_t difficulty) {
     if (active_mining_task.active) {
         return;
@@ -84,6 +101,18 @@ static void send_handshake_to_contact(const uint8_t recipient_pk[32], uint32_t d
     }
 }
 
+
+static bool should_process_update(const char* path, uint32_t current_version) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    update_manifest_t manifest;
+    size_t read_bytes = std::fread(&manifest, 1, sizeof(update_manifest_t), f);
+    std::fclose(f);
+    if (read_bytes == sizeof(update_manifest_t)) {
+        return (manifest.magic == 0x55504434 && manifest.version > current_version);
+    }
+    return false;
+}
 
 
 int main(int argc, char* argv[]) {
@@ -130,7 +159,9 @@ int main(int argc, char* argv[]) {
     bool force_redraw = true;
     char prev_link_status[128] = "";
     int selected_menu_item = 0;
-    int app_state = 0; // 0 = main menu, 1 = pattern setup, 2 = settings, 3 = show pk, 4 = select recipient, 5 = add contact
+    int app_state = 0; // 0 = main menu, 1 = pattern setup, 2 = settings, 3 = show pk, 4 = select recipient, 5 = add contact, 6 = incoming request
+    u64 last_handshake_resend = 0;
+    const u64 HANDSHAKE_RESEND_MS = 8000;
     int temp_selected_idx = 0;
     
     uint32_t temp_seq[16];
@@ -213,16 +244,10 @@ int main(int argc, char* argv[]) {
                         buffer.load_from_file("sdmc:/3ds/3dsrelay.packets");
 
                         // auto-install signed update packages if present
-                        FILE* update_f = std::fopen("sdmc:/3ds/3DSRelay.update", "rb");
-                        if (update_f) {
-                            std::fclose(update_f);
+                        if (should_process_update("sdmc:/3ds/3DSRelay.update", CURRENT_APP_VERSION)) {
                             process_local_update_file("sdmc:/3ds/3DSRelay.update", text_buf, bottom_target);
-                        } else {
-                            FILE* ready_f = std::fopen("sdmc:/3ds/3DSRelay_ready.update", "rb");
-                            if (ready_f) {
-                                std::fclose(ready_f);
-                                process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
-                            }
+                        } else if (should_process_update("sdmc:/3ds/3DSRelay_ready.update", CURRENT_APP_VERSION)) {
+                            process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
                         }
                     } else {
                         system_unlocked = false;
@@ -248,7 +273,8 @@ int main(int argc, char* argv[]) {
                 }
                 if (keys_down & KEY_A) {
                     if (selected_menu_item == 0) {
-                        if (contact_count > 0 && contact_list[selected_contact_idx].active) {
+                        // only confirmed (mutually handshaked) contacts can receive messages
+                        if (contact_count > 0 && contact_list[selected_contact_idx].active && contact_list[selected_contact_idx].confirmed) {
                             SwkbdState swkbd;
                             swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, -1);
                             swkbdSetHintText(&swkbd, "Enter message to send...");
@@ -379,7 +405,7 @@ int main(int argc, char* argv[]) {
                         std::memset(temp_seq, 0, sizeof(temp_seq));
                         force_redraw = true;
                     } else if (selected_menu_item == 2) {
-                        check_mesh_for_update(text_buf, bottom_target);
+                        check_mesh_for_update(link, text_buf, bottom_target);
                         force_redraw = true;
                     } else if (selected_menu_item == 3) {
                         wipe_runtime_secrets(buffer);
@@ -438,7 +464,8 @@ int main(int argc, char* argv[]) {
                     force_redraw = true;
                 }
                 if (keys_down & KEY_A) {
-                    if (contact_list[temp_selected_idx].active) {
+                    // pending contacts stay unselectable until the handshake is mutual
+                    if (contact_list[temp_selected_idx].active && contact_list[temp_selected_idx].confirmed) {
                         selected_contact_idx = temp_selected_idx;
                         app_state = 0;
                         selected_menu_item = 1;
@@ -481,9 +508,10 @@ int main(int argc, char* argv[]) {
                             if (std::strlen(key_hex) >= 64) {
                                 const char* alias = scanned_alias[0] ? scanned_alias : "Unknown";
                                 if (add_contact_record(alias, key_hex)) {
+                                    // pending until the peer also adds us and a handshake arrives back
                                     uint8_t target_pk[32];
                                     hex_to_bytes(key_hex, target_pk, 32);
-                                    send_handshake_to_contact(target_pk, difficulty);
+                                    enqueue_handshake(target_pk);
                                 }
                             }
                         }
@@ -502,9 +530,10 @@ int main(int argc, char* argv[]) {
 
                             if (pk_btn == SWKBD_BUTTON_RIGHT) {
                                 if (add_contact_record(name_buf, pk_hex_buf)) {
+                                    // pending until the peer also adds us and a handshake arrives back
                                     uint8_t target_pk[32];
                                     hex_to_bytes(pk_hex_buf, target_pk, 32);
-                                    send_handshake_to_contact(target_pk, difficulty);
+                                    enqueue_handshake(target_pk);
                                 }
                             }
                         }
@@ -518,6 +547,41 @@ int main(int argc, char* argv[]) {
                 if (keys_down & KEY_B) {
                     app_state = 0;
                     selected_menu_item = 2;
+                    force_redraw = true;
+                }
+            } else if (app_state == 6) {
+                // accept/reject an unsolicited handshake; a contact registers only on mutual consent
+                if (incoming_request_count > 0) {
+                    bool handled = false;
+                    if (keys_down & KEY_A) {
+                        std::string hex = bytes_to_hex(incoming_requests[0].pk_box, 32);
+                        if (add_contact_record(incoming_requests[0].alias, hex.c_str())) {
+                            for (int ci = 0; ci < contact_count; ++ci) {
+                                if (contact_list[ci].active && std::memcmp(contact_list[ci].pk_box, incoming_requests[0].pk_box, 32) == 0) {
+                                    contact_list[ci].confirmed = true; // both sides have now consented
+                                    break;
+                                }
+                            }
+                            save_contacts_to_file();
+                            enqueue_handshake(incoming_requests[0].pk_box); // let the peer confirm us too
+                        }
+                        handled = true;
+                    } else if (keys_down & KEY_B) {
+                        handled = true; // reject: drop without registering
+                    }
+                    if (handled) {
+                        for (int ri = 1; ri < incoming_request_count; ++ri) {
+                            incoming_requests[ri - 1] = incoming_requests[ri];
+                        }
+                        incoming_request_count--;
+                        if (incoming_request_count == 0) {
+                            app_state = 0;
+                            selected_menu_item = 0;
+                        }
+                        force_redraw = true;
+                    }
+                } else {
+                    app_state = 0;
                     force_redraw = true;
                 }
             }
@@ -547,30 +611,46 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                             if (found_idx >= 0) {
-                                // reciprocal handshake from known contact; confirm but never touch alias
+                                // reciprocal handshake from a contact we already added: mutual
+                                // consent is reached, confirm and reciprocate (never touch alias)
                                 if (!contact_list[found_idx].confirmed) {
                                     contact_list[found_idx].confirmed = true;
                                     save_contacts_to_file();
                                 }
-                            } else if (contact_count < 5) {
-                                int slot = contact_count;
-                                contact_count++;
-                                std::snprintf(contact_list[slot].alias, sizeof(contact_list[slot].alias), "%s", handshake_alias);
-                                std::memcpy(contact_list[slot].pk_box, handshake_pk, 32);
-                                contact_list[slot].active = true;
-                                contact_list[slot].confirmed = false;
-                                if (contact_count == 1) {
-                                    selected_contact_idx = slot;
+                                enqueue_handshake(handshake_pk); // ensure the peer confirms us too
+                            } else {
+                                // unsolicited handshake: do not register. queue it for the user
+                                // to accept or reject, deduping against pending requests
+                                bool dup = false;
+                                for (int ri = 0; ri < incoming_request_count; ++ri) {
+                                    if (std::memcmp(incoming_requests[ri].pk_box, handshake_pk, 32) == 0) {
+                                        dup = true;
+                                        break;
+                                    }
                                 }
-                                save_contacts_to_file();
-                                // send reciprocal handshake so the other side adds us
-                                send_handshake_to_contact(handshake_pk, difficulty);
+                                if (!dup && incoming_request_count < 5) {
+                                    std::strncpy(incoming_requests[incoming_request_count].alias, handshake_alias, sizeof(incoming_requests[incoming_request_count].alias) - 1);
+                                    incoming_requests[incoming_request_count].alias[sizeof(incoming_requests[incoming_request_count].alias) - 1] = '\0';
+                                    std::memcpy(incoming_requests[incoming_request_count].pk_box, handshake_pk, 32);
+                                    incoming_request_count++;
+                                }
                             }
                         }
                     }
                     force_redraw = true;
                 }
             }
+        }
+
+        // start the next queued handshake once the single pow miner is free
+        if (system_unlocked && keys_derived && !active_mining_task.active && handshake_queue_len > 0) {
+            uint8_t next_pk[32];
+            std::memcpy(next_pk, handshake_queue[0], 32);
+            for (int i = 1; i < handshake_queue_len; ++i) {
+                std::memcpy(handshake_queue[i - 1], handshake_queue[i], 32);
+            }
+            handshake_queue_len--;
+            send_handshake_to_contact(next_pk, difficulty);
         }
 
         // Execute active background mining step
@@ -585,6 +665,13 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Handle UDS update port serving in main loop
+        if (link.is_connected()) {
+            serve_mesh_update_requests(link);
+        } else {
+            cleanup_mesh_update_port();
+        }
+
         // periodic check for background-downloaded updates
         if (system_unlocked && keys_derived) {
             u64 now_uc = osGetTime();
@@ -596,6 +683,26 @@ int main(int argc, char* argv[]) {
                     process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
                 }
             }
+        }
+
+        // periodically resend handshakes to unconfirmed contacts so scan order and
+        // packet loss do not stall mutual confirmation
+        if (system_unlocked && keys_derived) {
+            u64 now_hs = osGetTime();
+            if (now_hs - last_handshake_resend >= HANDSHAKE_RESEND_MS) {
+                last_handshake_resend = now_hs;
+                for (int ci = 0; ci < contact_count; ++ci) {
+                    if (contact_list[ci].active && !contact_list[ci].confirmed) {
+                        enqueue_handshake(contact_list[ci].pk_box);
+                    }
+                }
+            }
+        }
+
+        // surface a pending handshake request for accept/reject when idle at the menu
+        if (system_unlocked && app_state == 0 && incoming_request_count > 0) {
+            app_state = 6;
+            force_redraw = true;
         }
 
         // background sector scanner updates fake animation ticker
@@ -641,6 +748,10 @@ int main(int argc, char* argv[]) {
                         draw_bottom_screen_select_recipient(text_buf, temp_selected_idx);
                     } else if (app_state == 5) {
                         draw_bottom_screen_add_contact(text_buf, selected_menu_item);
+                    } else if (app_state == 6) {
+                        const char* req_alias = incoming_request_count > 0 ? incoming_requests[0].alias : "";
+                        std::string req_fp = incoming_request_count > 0 ? public_key_fingerprint(incoming_requests[0].pk_box) : std::string();
+                        draw_bottom_screen_incoming_request(text_buf, req_alias, req_fp.c_str());
                     }
                 }
 

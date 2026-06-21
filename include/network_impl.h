@@ -15,8 +15,13 @@ public:
     virtual bool receive(packet_t& output_packet) override;
     virtual void shutdown() override;
     virtual void get_status_info(char* out_buf, size_t max_len) override;
+    Result receive_raw(void* buf, size_t size, size_t* actual_size, u16* src_node);
     bool is_connected() const { return is_connected_; }
     bool is_active() const { return uds_active_; }
+
+// UDS update packet queues over channel 1
+bool check_and_pop_update_packet(update_packet_t& out_packet, u16& out_src_node);
+void push_update_packet(const update_packet_t& packet, u16 src_node);
 
 private:
     bool uds_active_;

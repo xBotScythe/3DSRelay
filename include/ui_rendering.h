@@ -17,6 +17,7 @@ void draw_bottom_screen_system_settings(C2D_TextBuf text_buf, int selected_item)
 void draw_bottom_screen_show_pk(C2D_TextBuf text_buf);
 void draw_bottom_screen_add_contact(C2D_TextBuf text_buf, int selected_item);
 void draw_bottom_screen_select_recipient(C2D_TextBuf text_buf, int temp_selected);
+void draw_bottom_screen_incoming_request(C2D_TextBuf text_buf, const char* alias, const char* fingerprint);
 void draw_bottom_screen_pattern_setup(C2D_TextBuf text_buf, const uint32_t* temp_seq, size_t temp_len);
 
 #endif

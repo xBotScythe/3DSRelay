@@ -26,6 +26,11 @@ contact_t contact_list[5] = {
 int contact_count = 0;
 int selected_contact_idx = 0;
 
+// unsolicited handshakes awaiting the user's accept/reject decision; ram-only,
+// senders resend periodically so a missed request reappears
+incoming_request_t incoming_requests[5] = {};
+int incoming_request_count = 0;
+
 // global key variables
 uint8_t static_pk_sign[32];
 uint8_t static_sk_sign[64];
@@ -542,7 +547,7 @@ const uint8_t dev_pk_sign[32] = {
     0xfe, 0x6d, 0x93, 0xda, 0xe8, 0x61, 0x39, 0x0f, 0x8d, 0xc5, 0x71, 0xda, 0x91, 0xf9, 0x0f, 0x4d
 };
 
-const uint32_t CURRENT_APP_VERSION = 201; // v2.0.1
+const uint32_t CURRENT_APP_VERSION = 210; // v2.1.0
 
 bool verify_update_manifest(const update_manifest_t& manifest) {
     if (manifest.magic != 0x55504434) {
@@ -694,7 +699,8 @@ bool add_contact_record(const char* alias, const char* key_or_card) {
         return false;
     }
     
-    std::snprintf(contact_list[target_slot].alias, sizeof(contact_list[target_slot].alias), "%s", alias);
+    std::strncpy(contact_list[target_slot].alias, alias, sizeof(contact_list[target_slot].alias) - 1);
+    contact_list[target_slot].alias[sizeof(contact_list[target_slot].alias) - 1] = '\0';
     std::memcpy(contact_list[target_slot].pk_box, pk, 32);
     contact_list[target_slot].active = true;
     contact_list[target_slot].confirmed = false;

@@ -88,16 +88,16 @@ else
 
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:=	-g -Wall -O2 -mword-relocations \
-			-ffunction-sections \
+CFLAGS	:=	-Wall -Os -mword-relocations \
+			-ffunction-sections -fdata-sections \
 			$(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__ -Wno-sign-compare
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
-ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ASFLAGS	:=	$(ARCH)
+LDFLAGS	=	-specs=3dsx.specs $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
 LIBS	:= -lcitro2d -lcitro3d -lctru -lm
 LIBDIRS	:= $(CTRULIB)

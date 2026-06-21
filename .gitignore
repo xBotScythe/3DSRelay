@@ -5,6 +5,7 @@ build/
 *.smdh
 *.map
 *.cia
+*.cia.gz
 *.o
 *.d
 
