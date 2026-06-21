@@ -55,7 +55,7 @@ def main():
         print("usage: ./pack_update.py [private_key_hex] [--cia <path>] [--out <path>]")
         print("       SIGNING_KEY=<hex> ./pack_update.py [--cia <path>] [--out <path>]")
         print()
-        print("reads CURRENT_APP_VERSION from source/crypto_utils.cpp")
+        print("reads CURRENT_APP_VERSION from source/version.cpp")
         print("key can be passed as first arg or SIGNING_KEY env var")
         print("defaults: --cia 3DSRelay.cia  --out 3DSRelay.update")
         sys.exit(0 if "--help" in sys.argv else 1)
@@ -77,9 +77,9 @@ def main():
             sys.exit(1)
 
     # auto-read version from source
-    version = extract_version("source/crypto_utils.cpp", r"CURRENT_APP_VERSION")
+    version = extract_version("source/version.cpp", r"CURRENT_APP_VERSION")
     if version is None:
-        print("error: could not read CURRENT_APP_VERSION from source/crypto_utils.cpp")
+        print("error: could not read CURRENT_APP_VERSION from source/version.cpp")
         sys.exit(1)
 
     run(cia_path, priv_key_hex, version, out_path)

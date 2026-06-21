@@ -4,6 +4,7 @@
 #include "qr_scan.h"
 #include "ui_rendering.h"
 #include "network_impl.h"
+#include "crypto_utils.h"
 #include "quirc/quirc.h"
 #include <cstdlib>
 #include <cstdio>
@@ -228,7 +229,7 @@ static void update_ui_thread(void* arg) {
         draw_text(data->text_buf, "Scan Contact QR", 12, 6, 0.55f, C2D_Color32(0, 255, 210, 255));
         draw_rect_outline(36, 44, 248, 148, 2.0f, C2D_Color32(0, 255, 210, 220));
         draw_text(data->text_buf, "Point outer camera at QR", 12, 200, 0.38f, C2D_Color32(255, 255, 255, 255));
-        draw_text(data->text_buf, "Press A to scan, B to cancel", 12, 214, 0.38f, C2D_Color32(255, 82, 82, 255));
+        draw_text(data->text_buf, "A/L/R: scan   B: cancel", 12, 214, 0.38f, C2D_Color32(255, 82, 82, 255));
         if (data->qr_debug_msg[0] != '\0') {
             draw_text(data->text_buf, data->qr_debug_msg, 12, 186, 0.32f, C2D_Color32(200, 200, 200, 255));
         }
@@ -308,6 +309,17 @@ static bool update_qr_decode(qr_scan_state* data, struct quirc_data* scan_data, 
         return false;
     }
 
+    // signed binary card: expand to 3dsr2 text for verification on add
+    if (scan_data->payload_len >= 2 && scan_data->payload[0] == BIN_CARD_MAGIC) {
+        if (binary_card_to_text(scan_data->payload, (size_t)scan_data->payload_len, card_out, card_out_len)) {
+            std::snprintf(data->qr_debug_msg, sizeof(data->qr_debug_msg), "signed card");
+            return true;
+        }
+        std::snprintf(data->qr_debug_msg, sizeof(data->qr_debug_msg), "bad signed card");
+        return false;
+    }
+
+    // legacy unsigned text card
     if (!is_contact_card_payload((const char*)scan_data->payload)) {
         std::snprintf(data->qr_debug_msg, sizeof(data->qr_debug_msg), "payload not contact card: %.32s", (const char*)scan_data->payload);
         return false;
@@ -441,8 +453,8 @@ bool run_qr_contact_scan(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_Rend
                 break;
             }
 
-            // scan when a button pressed
-            if (keys & KEY_A) {
+            // scan on A or either shoulder button
+            if (keys & (KEY_A | KEY_L | KEY_R)) {
                 std::snprintf(state.qr_debug_msg, sizeof(state.qr_debug_msg), "Scanning...");
                 if (update_qr_decode(&state, scan_data, card_out, card_out_len)) {
                     found = true;

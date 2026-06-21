@@ -9,6 +9,9 @@ build/
 *.o
 *.d
 
+# host test binary
+tests/protocol_test
+
 # runtime
 *.cfg
 .3ds_ip

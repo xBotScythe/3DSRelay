@@ -172,10 +172,9 @@ bool process_local_update_file(const char* update_path, C2D_TextBuf text_buf, C3
         return false;
     }
 
-    // Keep the original package on the SD card so we can continue to seed/serve it to other peers on the UDS mesh.
-    // The startup check in main.cpp checks the version dynamically to prevent reprocessing.
+    // keep update package on sd to seed it to other peers
 
-    // proceed with install
+    // install payload
     install_cia("sdmc:/3ds/3DSRelay_temp.cia", text_buf, bottom_target);
     return true;
 }
@@ -442,9 +441,10 @@ bool check_mesh_for_update(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_Re
 
     // Verify UDS connection is active before running queries
     if (!link.is_connected()) {
+        char ver_str[16];
+        format_app_version(CURRENT_APP_VERSION, ver_str, sizeof(ver_str));
         char msg[128];
-        std::snprintf(msg, sizeof(msg), "Running v%lu.%lu.%lu.\nNo local update found.\nVerify UDS mesh connection is active.",
-            (unsigned long)(CURRENT_APP_VERSION / 100), (unsigned long)((CURRENT_APP_VERSION / 10) % 10), (unsigned long)(CURRENT_APP_VERSION % 10));
+        std::snprintf(msg, sizeof(msg), "Running %s.\nNo local update found.\nVerify UDS mesh connection is active.", ver_str);
         draw_update_notice(text_buf, bottom_target, "Check for Updates", msg);
         svcSleepThread(3000000000ULL);
         return false;
@@ -461,9 +461,10 @@ bool check_mesh_for_update(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_Re
         return false;
     }
 
+    char found_ver[16];
+    format_app_version(manifest.version, found_ver, sizeof(found_ver));
     char progress_msg[128];
-    std::snprintf(progress_msg, sizeof(progress_msg), "Found update v%lu.%lu.%lu!\nDownloading via UDS...",
-        (unsigned long)(manifest.version / 100), (unsigned long)((manifest.version / 10) % 10), (unsigned long)(manifest.version % 10));
+    std::snprintf(progress_msg, sizeof(progress_msg), "Found update %s!\nDownloading via UDS...", found_ver);
     draw_update_notice(text_buf, bottom_target, "OTA Update", progress_msg);
 
     // windowed transfer with bitmap-based resume and peer re-acquisition

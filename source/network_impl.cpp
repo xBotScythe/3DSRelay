@@ -2,6 +2,7 @@
 // implementation of concrete network link interface for emulation and native hardware
 
 #include "network_impl.h"
+#include "metadata.h"
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
@@ -61,7 +62,7 @@ void NativeNetworkLink::broadcast(const packet_t& packet) {
 
     if (is_connected_) {
         // randomized pre-send delay to avoid lockstep collisions in dense exchanges
-        svcSleepThread((u64)(1000000ULL + (std::rand() % 4000000ULL)));
+        svcSleepThread((u64)relay_jitter_us((uint32_t)std::rand()) * 1000ULL);
         udsSendTo(UDS_BROADCAST_NETWORKNODEID, 1, UDS_SENDFLAG_Broadcast, &packet, sizeof(packet_t));
     }
 }

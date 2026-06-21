@@ -2,6 +2,8 @@
 // ring-buffer and signature cache operations
 
 #include "ringbuffer.h"
+#include "chacha20.h" // chacha20_crypt + secure_random_bytes
+#include "sha256.h"   // hmac_sha256
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -110,45 +112,123 @@ void PacketRingBuffer::clear() {
     std::memset(data_, 0, sizeof(data_));
 }
 
-bool PacketRingBuffer::save_to_file(const char* filepath) const {
+bool PacketRingBuffer::save_to_file(const char* filepath, const uint8_t enc_key[32], const uint8_t mac_key[32]) const {
     char tmp_path[256];
     std::snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
     std::FILE* f = std::fopen(tmp_path, "wb");
     if (!f) {
         return false;
     }
+
     size_t count = size_;
-    std::fwrite(&count, sizeof(count), 1, f);
+    size_t body = sizeof(size_t) + count * sizeof(packet_t);
+    uint8_t* plain = (uint8_t*)std::malloc(body);
+    uint8_t* cipher = (uint8_t*)std::malloc(body);
+    uint8_t* mac_input = (uint8_t*)std::malloc(12 + body);
+    if (!plain || !cipher || !mac_input) {
+        std::free(plain); std::free(cipher); std::free(mac_input);
+        std::fclose(f);
+        return false;
+    }
+
+    std::memcpy(plain, &count, sizeof(size_t));
     for (size_t i = 0; i < count; ++i) {
         packet_t p;
-        if (get_at(i, p)) {
-            std::fwrite(&p, sizeof(packet_t), 1, f);
-        }
+        get_at(i, p);
+        std::memcpy(plain + sizeof(size_t) + i * sizeof(packet_t), &p, sizeof(packet_t));
     }
+
+    uint8_t nonce[12];
+    secure_random_bytes(nonce, 12);
+    chacha20_crypt(enc_key, nonce, 0, plain, cipher, body);
+
+    // encrypt-then-mac over nonce||ciphertext
+    std::memcpy(mac_input, nonce, 12);
+    std::memcpy(mac_input + 12, cipher, body);
+    sha256_hash_t mac = hmac_sha256(mac_key, 32, mac_input, 12 + body);
+
+    std::fwrite(nonce, 12, 1, f);
+    std::fwrite(mac.bytes, 32, 1, f);
+    std::fwrite(cipher, 1, body, f);
     std::fflush(f);
     std::fclose(f);
     std::rename(tmp_path, filepath);
+
+    std::memset(plain, 0, body);
+    std::free(plain); std::free(cipher); std::free(mac_input);
     return true;
 }
 
-bool PacketRingBuffer::load_from_file(const char* filepath) {
+bool PacketRingBuffer::load_from_file(const char* filepath, const uint8_t enc_key[32], const uint8_t mac_key[32]) {
     std::FILE* f = std::fopen(filepath, "rb");
     if (!f) {
         return false;
     }
-    clear();
-    size_t count = 0;
-    if (std::fread(&count, sizeof(count), 1, f) != 1) {
+    std::fseek(f, 0, SEEK_END);
+    long fsz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (fsz < (long)(12 + 32 + sizeof(size_t))) {
         std::fclose(f);
         return false;
     }
+
+    size_t body = (size_t)fsz - 12 - 32;
+    uint8_t nonce[12];
+    uint8_t mac_read[32];
+    uint8_t* cipher = (uint8_t*)std::malloc(body);
+    uint8_t* mac_input = (uint8_t*)std::malloc(12 + body);
+    if (!cipher || !mac_input) {
+        std::free(cipher); std::free(mac_input);
+        std::fclose(f);
+        return false;
+    }
+    if (std::fread(nonce, 12, 1, f) != 1 ||
+        std::fread(mac_read, 32, 1, f) != 1 ||
+        std::fread(cipher, 1, body, f) != body) {
+        std::free(cipher); std::free(mac_input);
+        std::fclose(f);
+        return false;
+    }
+    std::fclose(f);
+
+    // verify before decrypting
+    std::memcpy(mac_input, nonce, 12);
+    std::memcpy(mac_input + 12, cipher, body);
+    sha256_hash_t mac = hmac_sha256(mac_key, 32, mac_input, 12 + body);
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; ++i) {
+        diff |= mac.bytes[i] ^ mac_read[i];
+    }
+    std::free(mac_input);
+    if (diff != 0) {
+        std::free(cipher);
+        return false;
+    }
+
+    uint8_t* plain = (uint8_t*)std::malloc(body);
+    if (!plain) {
+        std::free(cipher);
+        return false;
+    }
+    chacha20_crypt(enc_key, nonce, 0, cipher, plain, body);
+    std::free(cipher);
+
+    size_t count = 0;
+    std::memcpy(&count, plain, sizeof(size_t));
+    size_t max_count = (body - sizeof(size_t)) / sizeof(packet_t);
+    if (count > max_count) {
+        count = max_count;
+    }
     for (size_t i = 0; i < count; ++i) {
         packet_t p;
-        if (std::fread(&p, sizeof(packet_t), 1, f) == 1) {
+        std::memcpy(&p, plain + sizeof(size_t) + i * sizeof(packet_t), sizeof(packet_t));
+        // merge: don't drop packets already buffered while locked
+        if (!contains(p)) {
             push(p);
         }
     }
-    std::fclose(f);
+    std::memset(plain, 0, body);
+    std::free(plain);
     return true;
 }
 

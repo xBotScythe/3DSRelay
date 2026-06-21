@@ -34,8 +34,10 @@ public:
     size_t size() const;
     size_t capacity() const;
     void clear();
-    bool save_to_file(const char* filepath) const;
-    bool load_from_file(const char* filepath);
+    // encrypted at rest with the storage keys; load merges (keeps packets
+    // received while locked) and verifies the mac before decrypting
+    bool save_to_file(const char* filepath, const uint8_t enc_key[32], const uint8_t mac_key[32]) const;
+    bool load_from_file(const char* filepath, const uint8_t enc_key[32], const uint8_t mac_key[32]);
     bool delete_store_file(const char* filepath);
 
 private:

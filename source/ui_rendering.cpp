@@ -158,8 +158,7 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
     C2D_DrawRectSolid(0, 0, 0.5f, 400, 28, C2D_Color32(26, 27, 38, 255));
     draw_text(text_buf, "FAT32 Diagnostics Console", 12, 6, 0.55f, C2D_Color32(0, 255, 210, 255));
     char ver_str[16];
-    std::snprintf(ver_str, sizeof(ver_str), "v%lu.%lu.%lu",
-        CURRENT_APP_VERSION / 100, (CURRENT_APP_VERSION / 10) % 10, CURRENT_APP_VERSION % 10);
+    format_app_version(CURRENT_APP_VERSION, ver_str, sizeof(ver_str));
     draw_text(text_buf, ver_str, 350, 8, 0.35f, C2D_Color32(154, 160, 166, 255));
     C2D_DrawRectSolid(0, 28, 0.5f, 400, 1, C2D_Color32(0, 255, 210, 80));
 
@@ -318,30 +317,34 @@ void draw_bottom_screen_system_settings(C2D_TextBuf text_buf, int selected_item)
 }
 
 
-static bool qr_build_contact(const char* payload, uint8_t modules[33][33]) {
-    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(5)];
-    uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(5)];
-    
+// builds the qr at a fixed version 7 (45x45) so the binary card stays
+// scannable from the outer camera; returns module count or 0 on failure
+static int qr_build_contact(const uint8_t* payload, size_t len, uint8_t modules[45][45]) {
+    static const int VER = 7;
+    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(VER)];
+    uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(VER)];
+
+    static uint8_t data[160];
+    if (len == 0 || len > sizeof(data)) {
+        return 0;
+    }
+    std::memcpy(data, payload, len);
+
     struct qrcodegen_Segment seg;
     seg.mode = qrcodegen_Mode_BYTE;
-    seg.bitLength = 0;
-    seg.numChars = std::strlen(payload);
-    uint8_t data[128];
+    seg.numChars = (int)len;
+    seg.bitLength = (int)len * 8;
     seg.data = data;
-    
-    for (size_t i = 0; i < std::strlen(payload); i++) {
-        data[i] = (uint8_t)payload[i];
-    }
-    seg.bitLength = std::strlen(payload) * 8;
-    
-    bool success = qrcodegen_encodeSegments(&seg, 1, qrcodegen_Ecc_LOW, tempBuffer, qrcode);
+
+    bool success = qrcodegen_encodeSegmentsAdvanced(&seg, 1, qrcodegen_Ecc_LOW,
+        VER, VER, qrcodegen_Mask_AUTO, false, tempBuffer, qrcode);
     if (!success) {
-        return false;
+        return 0;
     }
 
     int size = qrcodegen_getSize(qrcode);
-    if (size > 33) {
-        return false;
+    if (size > 45) {
+        return 0;
     }
 
     for (int y = 0; y < size; ++y) {
@@ -350,7 +353,7 @@ static bool qr_build_contact(const char* payload, uint8_t modules[33][33]) {
         }
     }
 
-    return true;
+    return size;
 }
 
 void draw_bottom_screen_add_contact(C2D_TextBuf text_buf, int selected_item) {
@@ -381,48 +384,41 @@ void draw_bottom_screen_add_contact(C2D_TextBuf text_buf, int selected_item) {
 }
 
 void draw_bottom_screen_show_pk(C2D_TextBuf text_buf) {
-    C2D_DrawRectSolid(0, 0, 0.5f, 320, 28, C2D_Color32(26, 27, 38, 255));
-    draw_text(text_buf, "My Public Key", 12, 6, 0.55f, C2D_Color32(0, 255, 210, 255));
-    C2D_DrawRectSolid(0, 28, 0.5f, 320, 1, C2D_Color32(0, 255, 210, 80));
-
-    draw_text(text_buf, "Share this contact card:", 12, 38, 0.42f, C2D_Color32(255, 255, 255, 255));
-
-    std::string pk_hex = bytes_to_hex(static_pk_box, 32);
-    std::string line1 = pk_hex.substr(0, 32);
-    std::string line2 = pk_hex.substr(32, 32);
+    // header carries the fingerprint for in-person verification
+    C2D_DrawRectSolid(0, 0, 0.5f, 320, 24, C2D_Color32(26, 27, 38, 255));
+    draw_text(text_buf, "My Public Key", 8, 4, 0.46f, C2D_Color32(0, 255, 210, 255));
     std::string fp = public_key_fingerprint(static_pk_box);
+    draw_text(text_buf, fp.c_str(), 138, 5, 0.40f, C2D_Color32(250, 200, 50, 255));
 
-    std::string card_full = public_contact_card();
-    std::string card_qr = std::string("3DSR1:") + config.user_alias + ":" + bytes_to_hex(static_pk_box, 32);
-    uint8_t qr[33][33];
-    bool qr_ok = qr_build_contact(card_qr.c_str(), qr);
-    C2D_DrawRectSolid(10, 55, 0.5f, 148, 148, C2D_Color32(245, 245, 245, 255));
-    draw_rect_outline(10, 55, 148, 148, 1.0f, C2D_Color32(255, 255, 255, 80));
-    if (qr_ok) {
-        for (int y = 0; y < 33; ++y) {
-            for (int x = 0; x < 33; ++x) {
+    static uint8_t card_bin[160];
+    size_t card_len = build_binary_contact_card(card_bin, sizeof(card_bin));
+    static uint8_t qr[45][45];
+    int qr_size = card_len ? qr_build_contact(card_bin, card_len, qr) : 0;
+
+    // large white field with a quiet-zone margin so the dense v7 card is
+    // resolvable by the other console's outer camera
+    const float field = 200.0f;
+    const float fx = (320.0f - field) / 2.0f;
+    const float fy = 26.0f;
+    C2D_DrawRectSolid(fx, fy, 0.5f, field, field, C2D_Color32(245, 245, 245, 255));
+    if (qr_size > 0) {
+        const float px = 4.0f;
+        const float span = qr_size * px;
+        const float ox = fx + (field - span) / 2.0f;
+        const float oy = fy + (field - span) / 2.0f;
+        for (int y = 0; y < qr_size; ++y) {
+            for (int x = 0; x < qr_size; ++x) {
                 if (qr[y][x]) {
-                    C2D_DrawRectSolid(18 + x * 4, 63 + y * 4, 0.5f, 4, 4, C2D_Color32(15, 15, 15, 255));
+                    C2D_DrawRectSolid(ox + x * px, oy + y * px, 0.5f, px, px, C2D_Color32(15, 15, 15, 255));
                 }
             }
         }
     } else {
-        draw_text(text_buf, "qr error", 58, 120, 0.45f, C2D_Color32(15, 15, 15, 255));
+        draw_text(text_buf, "qr error", fx + 70, fy + 92, 0.45f, C2D_Color32(15, 15, 15, 255));
     }
 
-    draw_text(text_buf, "Fingerprint", 170, 58, 0.36f, C2D_Color32(154, 160, 166, 255));
-    draw_text(text_buf, fp.c_str(), 170, 74, 0.42f, C2D_Color32(250, 200, 50, 255));
-
-    C2D_DrawRectSolid(166, 98, 0.5f, 144, 74, C2D_Color32(18, 20, 28, 255));
-    draw_rect_outline(166, 98, 144, 74, 1.0f, C2D_Color32(255, 255, 255, 20));
-
-    draw_text(text_buf, line1.substr(0, 16).c_str(), 172, 106, 0.30f, C2D_Color32(0, 255, 210, 255));
-    draw_text(text_buf, line1.substr(16, 16).c_str(), 172, 122, 0.30f, C2D_Color32(0, 255, 210, 255));
-    draw_text(text_buf, line2.substr(0, 16).c_str(), 172, 138, 0.30f, C2D_Color32(0, 255, 210, 255));
-    draw_text(text_buf, line2.substr(16, 16).c_str(), 172, 154, 0.30f, C2D_Color32(0, 255, 210, 255));
-
-    C2D_DrawRectSolid(0, 208, 0.5f, 320, 32, C2D_Color32(26, 27, 38, 255));
-    draw_text(text_buf, "Press B to return", 12, 214, 0.42f, C2D_Color32(255, 82, 82, 255));
+    C2D_DrawRectSolid(0, 226, 0.5f, 320, 14, C2D_Color32(26, 27, 38, 255));
+    draw_text(text_buf, "Show this to scan.  B: return", 8, 227, 0.36f, C2D_Color32(255, 255, 255, 255));
 }
 
 void draw_bottom_screen_select_recipient(C2D_TextBuf text_buf, int temp_selected) {

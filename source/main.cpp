@@ -37,8 +37,8 @@ static volatile bool lid_closed = false;
 
 void handle_apt_hook(APT_HookType hook, void* param) {
     if (hook == APTHOOK_ONSLEEP) {
-        // blank screens to save power when lid is closed while sustaining background activity
-        // sleep suppression is configured at startup so system remains active on lid close events
+        // lid closed: blank screens to save power; the foreground app keeps
+        // running and relaying. no sysmodule, so this is not background routing
         lid_closed = true;
         gspSetLcdForceBlack(true);
     } else if (hook == APTHOOK_ONWAKEUP) {
@@ -120,8 +120,8 @@ int main(int argc, char* argv[]) {
     C2D_Prepare();
     amInit();
 
-    // disable system sleep on lid close to sustain mesh routing in bag
-    // initialization occurs at startup to override default sleep behaviors
+    // keep the foreground app awake with the lid closed so it can keep
+    // relaying; only works while this app is the running title
     aptSetSleepAllowed(false);
 
     C3D_RenderTarget* top_target = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
@@ -138,7 +138,9 @@ int main(int argc, char* argv[]) {
 
     PacketRingBuffer buffer;
     SignatureCache sig_cache;
-    // messages kept in ram only, no disk load
+    // the packet store is encrypted with the at-rest keys, so it loads at
+    // unlock; saves are gated on keys_derived so locked relaying can't clobber
+    // it with an empty buffer
 
     if (!load_config(config) || config.unlock_sequence_len < 1 || config.unlock_sequence_len > 16) {
         initialize_default_config(config);
@@ -243,7 +245,7 @@ int main(int argc, char* argv[]) {
                         system_unlocked = true;
                         save_config(config);
                         load_contacts_from_file();
-                        buffer.load_from_file("sdmc:/3ds/3dsrelay.packets");
+                        buffer.load_from_file("sdmc:/3ds/3dsrelay.packets", atrest_enc, atrest_mac);
 
                         // auto-install signed update packages if present
                         if (should_process_update("sdmc:/3ds/3DSRelay.update", CURRENT_APP_VERSION)) {
@@ -429,11 +431,9 @@ int main(int argc, char* argv[]) {
                         svcSleepThread(1000000000ULL);
                         force_redraw = true;
                     } else if (selected_menu_item == 4) {
-                        wipe_runtime_secrets(buffer);
-                        system_unlocked = false;
-                        app_state = 0;
-                        selected_menu_item = 0;
-                        force_redraw = true;
+                        // lock & exit: scrub ram, keep the encrypted files, then quit
+                        scrub_runtime_secrets(buffer);
+                        break;
                     }
                 }
                 if (keys_down & KEY_B) {
@@ -495,29 +495,41 @@ int main(int argc, char* argv[]) {
                     char pk_hex_buf[65] = "";
 
                     if (selected_menu_item == 0) {
-                        // scan qr contact card (format: 3DSR1:<alias>:<pk_hex>)
-                        char card_buf[96] = "";
+                        // scan qr contact card: signed binary card, or legacy 3DSR1
+                        char card_buf[320] = "";
                         if (run_qr_contact_scan(link, text_buf, bottom_target, card_buf, sizeof(card_buf))) {
-                            char scanned_alias[16] = "";
-                            const char* key_hex = card_buf;
-                            if (std::strncmp(card_buf, "3DSR1:", 6) == 0) {
-                                const char* after_prefix = card_buf + 6;
-                                const char* colon = std::strchr(after_prefix, ':');
-                                if (colon && (colon - after_prefix) < 16) {
-                                    std::memcpy(scanned_alias, after_prefix, colon - after_prefix);
-                                    scanned_alias[colon - after_prefix] = '\0';
-                                    key_hex = colon + 1;
-                                } else {
-                                    key_hex = after_prefix;
+                            if (std::strncmp(card_buf, "3DSR2:", 6) == 0) {
+                                // signature is verified inside add_contact_record
+                                if (add_contact_record(NULL, card_buf)) {
+                                    const char* box_hex = std::strchr(card_buf + 6, ':'); // after alias
+                                    if (box_hex && std::strlen(box_hex + 1) >= 64) {
+                                        uint8_t target_pk[32];
+                                        hex_to_bytes(box_hex + 1, target_pk, 32);
+                                        enqueue_handshake(target_pk);
+                                    }
                                 }
-                            }
-                            if (std::strlen(key_hex) >= 64) {
-                                const char* alias = scanned_alias[0] ? scanned_alias : "Unknown";
-                                if (add_contact_record(alias, key_hex)) {
-                                    // pending until the peer reciprocates
-                                    uint8_t target_pk[32];
-                                    hex_to_bytes(key_hex, target_pk, 32);
-                                    enqueue_handshake(target_pk);
+                            } else {
+                                char scanned_alias[16] = "";
+                                const char* key_hex = card_buf;
+                                if (std::strncmp(card_buf, "3DSR1:", 6) == 0) {
+                                    const char* after_prefix = card_buf + 6;
+                                    const char* colon = std::strchr(after_prefix, ':');
+                                    if (colon && (colon - after_prefix) < 16) {
+                                        std::memcpy(scanned_alias, after_prefix, colon - after_prefix);
+                                        scanned_alias[colon - after_prefix] = '\0';
+                                        key_hex = colon + 1;
+                                    } else {
+                                        key_hex = after_prefix;
+                                    }
+                                }
+                                if (std::strlen(key_hex) >= 64) {
+                                    const char* alias = scanned_alias[0] ? scanned_alias : "Unknown";
+                                    if (add_contact_record(alias, key_hex)) {
+                                        // pending until the peer reciprocates
+                                        uint8_t target_pk[32];
+                                        hex_to_bytes(key_hex, target_pk, 32);
+                                        enqueue_handshake(target_pk);
+                                    }
                                 }
                             }
                         }
@@ -602,7 +614,10 @@ int main(int argc, char* argv[]) {
                 if (!buffer.contains(rx_packet)) {
                     buffer.push(rx_packet);
                     link.broadcast(rx_packet);
-                    buffer.save_to_file("sdmc:/3ds/3dsrelay.packets");
+                    // relaying works while locked; persistence waits for the keys
+                    if (keys_derived) {
+                        buffer.save_to_file("sdmc:/3ds/3dsrelay.packets", atrest_enc, atrest_mac);
+                    }
 
                     if (system_unlocked && keys_derived) {
                         uint8_t handshake_pk[32];
@@ -664,7 +679,9 @@ int main(int argc, char* argv[]) {
             if (solved) {
                 link.broadcast(active_mining_task.packet);
                 buffer.push(active_mining_task.packet);
-                buffer.save_to_file("sdmc:/3ds/3dsrelay.packets");
+                if (keys_derived) {
+                    buffer.save_to_file("sdmc:/3ds/3dsrelay.packets", atrest_enc, atrest_mac);
+                }
                 active_mining_task.active = false;
             }
         }

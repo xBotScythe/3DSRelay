@@ -16,13 +16,7 @@
 #include <3ds.h>
 #include "ui_rendering.h"
 
-contact_t contact_list[5] = {
-    {"", {0}, false, false},
-    {"", {0}, false, false},
-    {"", {0}, false, false},
-    {"", {0}, false, false},
-    {"", {0}, false, false}
-};
+contact_t contact_list[5] = {};
 int contact_count = 0;
 int selected_contact_idx = 0;
 
@@ -37,6 +31,15 @@ uint8_t static_sk_sign[64];
 uint8_t static_pk_box[32];
 uint8_t static_sk_box[32];
 bool keys_derived = false;
+
+// at-rest storage keys, separate from the network box secret
+uint8_t atrest_enc[32];
+uint8_t atrest_mac[32];
+
+// true once contacts are safe to persist: either loaded from a good file or
+// no file existed. false if a file is present but unreadable, so a later save
+// never overwrites recoverable contacts with an empty list
+static bool contacts_load_ok = false;
 
 bool use_deterministic_random = false;
 uint8_t deterministic_random_seed[32] = {0};
@@ -121,10 +124,18 @@ static void derive_keypairs_from_identity_seed(const uint8_t identity_seed[32]) 
     std::memcpy(deterministic_random_seed, box_seed.bytes, 32);
     crypto_box_keypair(static_pk_box, static_sk_box);
 
+    // dedicated at-rest enc/mac keys, independent of the network box secret
+    sha256_hash_t ar_enc = hmac_sha256((const uint8_t*)"3dsrelay-atrest-enc", 19, identity_seed, 32);
+    std::memcpy(atrest_enc, ar_enc.bytes, 32);
+    sha256_hash_t ar_mac = hmac_sha256((const uint8_t*)"3dsrelay-atrest-mac", 19, identity_seed, 32);
+    std::memcpy(atrest_mac, ar_mac.bytes, 32);
+
     use_deterministic_random = orig_use_det;
     std::memcpy(deterministic_random_seed, orig_seed, 32);
     std::memset(&sign_seed, 0, sizeof(sign_seed));
     std::memset(&box_seed, 0, sizeof(box_seed));
+    std::memset(&ar_enc, 0, sizeof(ar_enc));
+    std::memset(&ar_mac, 0, sizeof(ar_mac));
 }
 
 void hex_to_bytes(const char* hex, uint8_t* bytes, size_t len) {
@@ -230,6 +241,68 @@ std::string public_contact_card() {
     std::memcpy(sig, sm, 64);
 
     return std::string("3DSR2:") + config.user_alias + ":" + bytes_to_hex(static_pk_box, 32) + ":" + bytes_to_hex(static_pk_sign, 32) + ":" + bytes_to_hex(sig, 64);
+}
+
+size_t build_binary_contact_card(uint8_t* out, size_t out_cap) {
+    int alias_len = std::strlen(config.user_alias);
+    if (alias_len < 1) {
+        return 0;
+    }
+    if (alias_len > 15) {
+        alias_len = 15;
+    }
+    size_t need = 2 + (size_t)alias_len + 32 + 32 + 64;
+    if (out_cap < need) {
+        return 0;
+    }
+
+    size_t p = 0;
+    out[p++] = BIN_CARD_MAGIC;
+    out[p++] = (uint8_t)alias_len;
+    std::memcpy(out + p, config.user_alias, alias_len); p += alias_len;
+    std::memcpy(out + p, static_pk_box, 32); p += 32;
+    std::memcpy(out + p, static_pk_sign, 32); p += 32;
+
+    // signature over alias||box key, same message the 3dsr2 text card signs
+    uint8_t data[15 + 32];
+    std::memcpy(data, config.user_alias, alias_len);
+    std::memcpy(data + alias_len, static_pk_box, 32);
+    uint8_t sm[64 + 15 + 32];
+    unsigned long long smlen = 0;
+    crypto_sign(sm, &smlen, data, alias_len + 32, static_sk_sign);
+    std::memcpy(out + p, sm, 64); p += 64;
+    return p;
+}
+
+bool binary_card_to_text(const uint8_t* in, size_t in_len, char* out, size_t out_cap) {
+    if (in_len < 2 || in[0] != BIN_CARD_MAGIC) {
+        return false;
+    }
+    int alias_len = in[1];
+    if (alias_len < 1 || alias_len > 15) {
+        return false;
+    }
+    size_t need = 2 + (size_t)alias_len + 32 + 32 + 64;
+    if (in_len < need) {
+        return false;
+    }
+
+    const uint8_t* alias = in + 2;
+    const uint8_t* pk_box = alias + alias_len;
+    const uint8_t* pk_sign = pk_box + 32;
+    const uint8_t* sig = pk_sign + 32;
+
+    char alias_str[16];
+    std::memcpy(alias_str, alias, alias_len);
+    alias_str[alias_len] = '\0';
+
+    std::string s = std::string("3DSR2:") + alias_str + ":" +
+        bytes_to_hex(pk_box, 32) + ":" + bytes_to_hex(pk_sign, 32) + ":" + bytes_to_hex(sig, 64);
+    if (s.size() + 1 > out_cap) {
+        return false;
+    }
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return true;
 }
 
 bool encrypt_message_packet(packet_t& packet, const char* plaintext_msg, const uint8_t recipient_pk_box[32], const uint8_t sender_sk_box[32]) {
@@ -459,8 +532,10 @@ void sign_broadcast_data(uint8_t* payload, int data_len, const uint8_t sk_sign[6
     std::memcpy(payload + 50, sm, 64);
 }
 
+static const uint32_t CONTACTS_MAGIC_V1 = 0x43543331; // "CT31"
+
 bool save_contacts_to_file() {
-    if (!keys_derived) {
+    if (!keys_derived || !contacts_load_ok) {
         return false;
     }
     std::FILE* f = std::fopen(CONTACTS_FILE_PATH ".tmp", "wb");
@@ -468,24 +543,29 @@ bool save_contacts_to_file() {
         return false;
     }
 
-    uint8_t plaintext[4 + 250];
+    const size_t body = 4 + sizeof(contact_list);
+    uint8_t plaintext[4 + sizeof(contact_list)];
     std::memcpy(plaintext, &contact_count, 4);
-    std::memcpy(plaintext + 4, contact_list, 250);
+    std::memcpy(plaintext + 4, contact_list, sizeof(contact_list));
 
     uint8_t nonce[12];
     secure_random_bytes(nonce, 12);
 
-    uint8_t ciphertext[4 + 250];
-    chacha20_crypt(static_sk_box, nonce, 0, plaintext, ciphertext, sizeof(ciphertext));
+    uint8_t ciphertext[4 + sizeof(contact_list)];
+    chacha20_crypt(atrest_enc, nonce, 0, plaintext, ciphertext, body);
 
-    uint8_t mac_input[12 + sizeof(ciphertext)];
-    std::memcpy(mac_input, nonce, 12);
-    std::memcpy(mac_input + 12, ciphertext, sizeof(ciphertext));
-    sha256_hash_t mac = hmac_sha256(static_sk_box, 32, mac_input, sizeof(mac_input));
+    // mac binds the format magic, nonce, and ciphertext (encrypt-then-mac)
+    uint32_t magic = CONTACTS_MAGIC_V1;
+    uint8_t mac_input[4 + 12 + sizeof(ciphertext)];
+    std::memcpy(mac_input, &magic, 4);
+    std::memcpy(mac_input + 4, nonce, 12);
+    std::memcpy(mac_input + 16, ciphertext, body);
+    sha256_hash_t mac = hmac_sha256(atrest_mac, 32, mac_input, 16 + body);
 
+    std::fwrite(&magic, 4, 1, f);
     std::fwrite(nonce, 12, 1, f);
     std::fwrite(mac.bytes, 32, 1, f);
-    std::fwrite(ciphertext, sizeof(ciphertext), 1, f);
+    std::fwrite(ciphertext, body, 1, f);
     std::fflush(f);
     std::fclose(f);
     std::rename(CONTACTS_FILE_PATH ".tmp", CONTACTS_FILE_PATH);
@@ -496,19 +576,16 @@ bool save_contacts_to_file() {
     return true;
 }
 
-bool load_contacts_from_file() {
-    if (!keys_derived) {
-        return false;
-    }
+// reads a pre-at-rest-key contacts file (keyed by static_sk_box) and rewrites
+// it in the new format so existing contacts survive the upgrade
+static bool load_contacts_legacy() {
     std::FILE* f = std::fopen(CONTACTS_FILE_PATH, "rb");
     if (!f) {
         return false;
     }
-    
     uint8_t nonce[12];
     uint8_t mac_read[32];
     uint8_t ciphertext[4 + 250];
-    
     if (std::fread(nonce, 12, 1, f) != 1 ||
         std::fread(mac_read, 32, 1, f) != 1 ||
         std::fread(ciphertext, sizeof(ciphertext), 1, f) != 1) {
@@ -516,29 +593,114 @@ bool load_contacts_from_file() {
         return false;
     }
     std::fclose(f);
-    
+
     uint8_t mac_input[12 + sizeof(ciphertext)];
     std::memcpy(mac_input, nonce, 12);
     std::memcpy(mac_input + 12, ciphertext, sizeof(ciphertext));
     sha256_hash_t mac = hmac_sha256(static_sk_box, 32, mac_input, sizeof(mac_input));
-    
     uint8_t diff = 0;
     for (int i = 0; i < 32; ++i) {
         diff |= mac.bytes[i] ^ mac_read[i];
     }
     std::memset(&mac, 0, sizeof(mac));
     std::memset(mac_input, 0, sizeof(mac_input));
-    
     if (diff != 0) {
         return false;
     }
-    
+
     uint8_t plaintext[4 + 250];
     chacha20_crypt(static_sk_box, nonce, 0, ciphertext, plaintext, sizeof(plaintext));
-    
-    std::memcpy(&contact_count, plaintext, 4);
-    std::memcpy(contact_list, plaintext + 4, 245);
+
+    // old layout: {alias[16], pk_box[32], active, confirmed} = 50 bytes each
+    #pragma pack(push, 1)
+    struct contact_legacy_t {
+        char alias[16];
+        uint8_t pk_box[32];
+        bool active;
+        bool confirmed;
+    };
+    #pragma pack(pop)
+
+    int old_count = 0;
+    std::memcpy(&old_count, plaintext, 4);
+    contact_legacy_t old_list[5];
+    std::memcpy(old_list, plaintext + 4, sizeof(old_list));
     std::memset(plaintext, 0, sizeof(plaintext));
+
+    std::memset(contact_list, 0, sizeof(contact_list));
+    contact_count = (old_count < 0 || old_count > 5) ? 0 : old_count;
+    for (int i = 0; i < 5; ++i) {
+        std::memcpy(contact_list[i].alias, old_list[i].alias, 16);
+        std::memcpy(contact_list[i].pk_box, old_list[i].pk_box, 32);
+        contact_list[i].active = old_list[i].active;
+        contact_list[i].confirmed = old_list[i].confirmed;
+        // grandfather existing contacts as verified; signing key relearned later
+        contact_list[i].trust = old_list[i].active ? CONTACT_VERIFIED : CONTACT_UNVERIFIED;
+    }
+
+    contacts_load_ok = true;
+    save_contacts_to_file(); // rewrite in the new at-rest format
+    return true;
+}
+
+bool load_contacts_from_file() {
+    if (!keys_derived) {
+        return false;
+    }
+    std::FILE* f = std::fopen(CONTACTS_FILE_PATH, "rb");
+    if (!f) {
+        // no file yet: a fresh store is safe to write
+        contacts_load_ok = true;
+        return false;
+    }
+
+    // block saves until the file reads cleanly so a bad read can't overwrite
+    // recoverable contacts
+    contacts_load_ok = false;
+
+    uint32_t magic = 0;
+    if (std::fread(&magic, 4, 1, f) != 1) {
+        std::fclose(f);
+        return false;
+    }
+    if (magic != CONTACTS_MAGIC_V1) {
+        std::fclose(f);
+        return load_contacts_legacy();
+    }
+
+    const size_t body = 4 + sizeof(contact_list);
+    uint8_t nonce[12];
+    uint8_t mac_read[32];
+    uint8_t ciphertext[4 + sizeof(contact_list)];
+    if (std::fread(nonce, 12, 1, f) != 1 ||
+        std::fread(mac_read, 32, 1, f) != 1 ||
+        std::fread(ciphertext, body, 1, f) != 1) {
+        std::fclose(f);
+        return false;
+    }
+    std::fclose(f);
+
+    uint8_t mac_input[4 + 12 + sizeof(ciphertext)];
+    std::memcpy(mac_input, &magic, 4);
+    std::memcpy(mac_input + 4, nonce, 12);
+    std::memcpy(mac_input + 16, ciphertext, body);
+    sha256_hash_t mac = hmac_sha256(atrest_mac, 32, mac_input, 16 + body);
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; ++i) {
+        diff |= mac.bytes[i] ^ mac_read[i];
+    }
+    std::memset(&mac, 0, sizeof(mac));
+    std::memset(mac_input, 0, sizeof(mac_input));
+    if (diff != 0) {
+        return false;
+    }
+
+    uint8_t plaintext[4 + sizeof(contact_list)];
+    chacha20_crypt(atrest_enc, nonce, 0, ciphertext, plaintext, body);
+    std::memcpy(&contact_count, plaintext, 4);
+    std::memcpy(contact_list, plaintext + 4, sizeof(contact_list));
+    std::memset(plaintext, 0, sizeof(plaintext));
+    contacts_load_ok = true;
     return true;
 }
 
@@ -546,8 +708,6 @@ const uint8_t dev_pk_sign[32] = {
     0xde, 0x42, 0x04, 0x38, 0xaf, 0xf5, 0x53, 0x6b, 0x4f, 0x12, 0x20, 0x71, 0x57, 0x88, 0xd9, 0x1f,
     0xfe, 0x6d, 0x93, 0xda, 0xe8, 0x61, 0x39, 0x0f, 0x8d, 0xc5, 0x71, 0xda, 0x91, 0xf9, 0x0f, 0x4d
 };
-
-const uint32_t CURRENT_APP_VERSION = 220; // v2.2.0
 
 bool verify_update_manifest(const update_manifest_t& manifest) {
     if (manifest.magic != 0x55504434) {
@@ -567,6 +727,24 @@ bool verify_update_manifest(const update_manifest_t& manifest) {
     return (res == 0 && mlen == msg_len);
 }
 
+void scrub_runtime_secrets(PacketRingBuffer& buffer) {
+    // ram-only: keeps the encrypted contacts and packet files so a routine
+    // lock or exit preserves data
+    buffer.clear();
+    clear_decryption_cache();
+    std::memset(static_sk_box, 0, 32);
+    std::memset(static_pk_box, 0, 32);
+    std::memset(static_sk_sign, 0, 64);
+    std::memset(static_pk_sign, 0, 32);
+    std::memset(atrest_enc, 0, 32);
+    std::memset(atrest_mac, 0, 32);
+    std::memset(contact_list, 0, sizeof(contact_list));
+    contact_count = 0;
+    selected_contact_idx = 0;
+    keys_derived = false;
+    contacts_load_ok = false;
+}
+
 void wipe_runtime_secrets(PacketRingBuffer& buffer) {
     buffer.clear();
     clear_decryption_cache();
@@ -576,10 +754,13 @@ void wipe_runtime_secrets(PacketRingBuffer& buffer) {
     std::memset(static_pk_box, 0, 32);
     std::memset(static_sk_sign, 0, 64);
     std::memset(static_pk_sign, 0, 32);
+    std::memset(atrest_enc, 0, 32);
+    std::memset(atrest_mac, 0, 32);
     std::memset(contact_list, 0, sizeof(contact_list));
     contact_count = 0;
     selected_contact_idx = 0;
     keys_derived = false;
+    contacts_load_ok = false;
 }
 
 static bool is_valid_hex_key(const char* hex) {
@@ -597,7 +778,12 @@ static bool is_valid_hex_key(const char* hex) {
 }
 
 bool add_contact_record(const char* alias, const char* key_or_card) {
-    if (!alias || !key_or_card || std::strlen(alias) == 0) {
+    if (!key_or_card) {
+        return false;
+    }
+    // signed cards carry their own alias; manual/legacy entries still require one
+    bool signed_card = std::strncmp(key_or_card, "3DSR2:", 6) == 0;
+    if (!signed_card && (!alias || std::strlen(alias) == 0)) {
         return false;
     }
     const char* key_hex = key_or_card;
@@ -609,7 +795,9 @@ bool add_contact_record(const char* alias, const char* key_or_card) {
     char pk_box_hex[65] = "";
     char pk_sign_hex[65] = "";
     char sig_hex[129] = "";
-    
+    uint8_t parsed_pk_sign[32] = {0};
+    bool have_pk_sign = false;
+
     if (std::strncmp(key_or_card, "3DSR2:", 6) == 0) {
         const char* p = key_or_card + 6;
         const char* next_colon = std::strchr(p, ':');
@@ -662,6 +850,8 @@ bool add_contact_record(const char* alias, const char* key_or_card) {
             if (crypto_sign_open(m, &mlen, sm, 64 + data_len, pk_sign) == 0 && mlen == (unsigned long long)data_len) {
                 alias = parsed_alias;
                 key_hex = pk_box_hex;
+                std::memcpy(parsed_pk_sign, pk_sign, 32);
+                have_pk_sign = true;
             } else {
                 return false;
             }
@@ -682,6 +872,11 @@ bool add_contact_record(const char* alias, const char* key_or_card) {
     // impersonation even if an attacker obtains the same raw public key
     for (int i = 0; i < contact_count; ++i) {
         if (contact_list[i].active && std::memcmp(contact_list[i].pk_box, pk, 32) == 0) {
+            // pin the signing key on first learn; never overwrite an existing pin
+            if (have_pk_sign && all_zero_local(contact_list[i].pk_sign, 32)) {
+                std::memcpy(contact_list[i].pk_sign, parsed_pk_sign, 32);
+                save_contacts_to_file();
+            }
             std::memset(pk, 0, sizeof(pk));
             return true;
         }
@@ -702,6 +897,14 @@ bool add_contact_record(const char* alias, const char* key_or_card) {
     std::strncpy(contact_list[target_slot].alias, alias, sizeof(contact_list[target_slot].alias) - 1);
     contact_list[target_slot].alias[sizeof(contact_list[target_slot].alias) - 1] = '\0';
     std::memcpy(contact_list[target_slot].pk_box, pk, 32);
+    if (have_pk_sign) {
+        std::memcpy(contact_list[target_slot].pk_sign, parsed_pk_sign, 32);
+    } else {
+        std::memset(contact_list[target_slot].pk_sign, 0, 32);
+    }
+    // added by the user in person; introductions later set the lower tier
+    contact_list[target_slot].trust = CONTACT_VERIFIED;
+    contact_list[target_slot].introducer[0] = '\0';
     contact_list[target_slot].active = true;
     contact_list[target_slot].confirmed = false;
     if (contact_count == 1) {
