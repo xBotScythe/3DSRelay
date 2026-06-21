@@ -158,6 +158,7 @@ int main(int argc, char* argv[]) {
     char prev_link_status[128] = "";
     int selected_menu_item = 0;
     int app_state = 0; // 0 = main menu, 1 = pattern setup, 2 = settings, 3 = show pk, 4 = select recipient, 5 = add contact, 6 = incoming request
+    int return_app_state = 0; // state to restore after handling an incoming request
     u64 last_handshake_resend = 0;
     const u64 HANDSHAKE_RESEND_MS = 8000;
     // cap resends so a one-sided add stops mining handshakes
@@ -308,6 +309,10 @@ int main(int argc, char* argv[]) {
                                     active_mining_task.active = true;
                                 }
                             }
+                        } else {
+                            // no confirmed recipient: tell the user instead of doing nothing
+                            draw_update_notice(text_buf, bottom_target, "Compose Private Msg", "Select a confirmed contact first.");
+                            svcSleepThread(1200000000ULL);
                         }
                         force_redraw = true;
                     } else if (selected_menu_item == 1) {
@@ -576,8 +581,7 @@ int main(int argc, char* argv[]) {
                         }
                         incoming_request_count--;
                         if (incoming_request_count == 0) {
-                            app_state = 0;
-                            selected_menu_item = 0;
+                            app_state = return_app_state; // back to where the prompt interrupted
                         }
                         force_redraw = true;
                     }
@@ -699,8 +703,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // surface a pending handshake request for accept/reject when idle at the menu
-        if (system_unlocked && app_state == 0 && incoming_request_count > 0) {
+        // auto-advance to the accept/reject prompt; skip the access-pattern screen
+        // so an unlock combo being recorded there is not discarded mid-entry
+        if (system_unlocked && incoming_request_count > 0 && app_state != 6 && app_state != 1) {
+            return_app_state = app_state;
             app_state = 6;
             force_redraw = true;
         }

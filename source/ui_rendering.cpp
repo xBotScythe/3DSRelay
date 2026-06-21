@@ -91,6 +91,68 @@ static void insert_dec_cache(const packet_t& p, const char* display_str) {
     dec_cache_head = (dec_cache_head + 1) % DEC_CACHE_SIZE;
 }
 
+// fills the user-facing line for a packet; false for handshakes and relayed
+// traffic not addressed to us, which are kept out of the message list
+static bool build_message_display(const packet_t& p, char* out, size_t out_len) {
+    char cached[128];
+    if (lookup_dec_cache(p, cached, sizeof(cached))) {
+        if (cached[0] == '\0') return false; // cached as not user-facing
+        std::snprintf(out, out_len, "%s", cached);
+        return true;
+    }
+
+    char display_str[128] = "";
+    bool show = false;
+    if (keys_derived) {
+        if (p.ver == 1) {
+            char plaintext[128] = "";
+            char sender_alias[32] = "";
+            if (decrypt_message_packet(p, plaintext, sizeof(plaintext), sender_alias, sizeof(sender_alias), static_sk_box)) {
+                std::snprintf(display_str, sizeof(display_str), "%.31s: %.90s", sender_alias, plaintext);
+                show = true;
+            }
+        } else if (p.ver == 3) {
+            char plaintext[128] = "";
+            char sender_alias[32] = "";
+            uint8_t sender_pk_box[32];
+            if (verify_broadcast_packet(p, sender_alias, sizeof(sender_alias), plaintext, sizeof(plaintext), sender_pk_box)) {
+                int contact_idx = -1;
+                for (int ci = 0; ci < contact_count; ++ci) {
+                    if (contact_list[ci].active && std::memcmp(contact_list[ci].pk_box, sender_pk_box, 32) == 0) {
+                        contact_idx = ci;
+                        break;
+                    }
+                }
+                if (contact_idx != -1) {
+                    std::snprintf(display_str, sizeof(display_str), "%.15s [Broadcast]: %.90s", contact_list[contact_idx].alias, plaintext);
+                } else {
+                    bool name_exists = false;
+                    for (int ci = 0; ci < contact_count; ++ci) {
+                        if (contact_list[ci].active && std::strcmp(contact_list[ci].alias, sender_alias) == 0) {
+                            name_exists = true;
+                            break;
+                        }
+                    }
+                    if (name_exists) {
+                        std::string fp = public_key_fingerprint(sender_pk_box);
+                        std::snprintf(display_str, sizeof(display_str), "%.31s_%.4s [BC]: %.84s", sender_alias, fp.c_str(), plaintext);
+                    } else {
+                        std::snprintf(display_str, sizeof(display_str), "%.31s [BC]: %.89s", sender_alias, plaintext);
+                    }
+                }
+                show = true;
+            }
+        }
+        // ver 2 handshakes and undecryptable relays are not shown
+    }
+
+    insert_dec_cache(p, show ? display_str : "");
+    if (show) {
+        std::snprintf(out, out_len, "%s", display_str);
+    }
+    return show;
+}
+
 void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const char* link_status) {
     // top screen header bar disguised as a diagnostics tool
     C2D_DrawRectSolid(0, 0, 0.5f, 400, 28, C2D_Color32(26, 27, 38, 255));
@@ -101,96 +163,41 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
     draw_text(text_buf, ver_str, 350, 8, 0.35f, C2D_Color32(154, 160, 166, 255));
     C2D_DrawRectSolid(0, 28, 0.5f, 400, 1, C2D_Color32(0, 255, 210, 80));
 
-    // show recent message list
-    size_t start_idx = (buffer.size() > 4) ? (buffer.size() - 4) : 0;
-    int line_offset = 0;
-    for (size_t i = start_idx; i < buffer.size(); ++i) {
+    // show the most recent user-facing messages, hiding relays and handshakes
+    const int MAX_SHOWN = 4;
+    char shown[MAX_SHOWN][128];
+    u32 shown_nonce[MAX_SHOWN];
+    int shown_count = 0;
+    for (size_t k = buffer.size(); k > 0 && shown_count < MAX_SHOWN; --k) {
         packet_t p;
-        if (buffer.get_at(i, p)) {
-            char display_str[128] = "";
-            bool cached = lookup_dec_cache(p, display_str, sizeof(display_str));
-            if (!cached) {
-                char plaintext[128] = "";
-                char sender_alias[32] = "";
-                bool dec_success = false;
+        if (!buffer.get_at(k - 1, p)) {
+            continue;
+        }
+        char display_str[128];
+        if (!build_message_display(p, display_str, sizeof(display_str))) {
+            continue;
+        }
+        std::snprintf(shown[shown_count], sizeof(shown[shown_count]), "%s", display_str);
+        shown_nonce[shown_count] = p.nonce;
+        shown_count++;
+    }
 
-                if (keys_derived) {
-                    if (p.ver == 1) {
-                        dec_success = decrypt_message_packet(p, plaintext, sizeof(plaintext), sender_alias, sizeof(sender_alias), static_sk_box);
-                        if (dec_success) {
-                            std::snprintf(display_str, sizeof(display_str), "%.31s: %.90s", sender_alias, plaintext);
-                        }
-                    } else if (p.ver == 2) {
-                        uint8_t handshake_pk[32];
-                        char handshake_alias[32] = "";
-                        if (decrypt_handshake_packet(p, handshake_pk, handshake_alias, sizeof(handshake_alias), static_sk_box)) {
-                            bool exists = false;
-                            for (int ci = 0; ci < contact_count; ++ci) {
-                                if (contact_list[ci].active && std::memcmp(contact_list[ci].pk_box, handshake_pk, 32) == 0) {
-                                    exists = true;
-                                    std::strncpy(handshake_alias, contact_list[ci].alias, sizeof(handshake_alias) - 1);
-                                    break;
-                                }
-                            }
-                            if (exists) {
-                                std::snprintf(display_str, sizeof(display_str), "[System: Handshake from %s]", handshake_alias);
-                            } else {
-                                std::snprintf(display_str, sizeof(display_str), "[System: Handshake from %s]", handshake_alias);
-                            }
-                            dec_success = true;
-                        }
-                    } else if (p.ver == 3) {
-                        uint8_t sender_pk_box[32];
-                        dec_success = verify_broadcast_packet(p, sender_alias, sizeof(sender_alias), plaintext, sizeof(plaintext), sender_pk_box);
-                        if (dec_success) {
-                            int contact_idx = -1;
-                            for (int ci = 0; ci < contact_count; ++ci) {
-                                if (contact_list[ci].active && std::memcmp(contact_list[ci].pk_box, sender_pk_box, 32) == 0) {
-                                    contact_idx = ci;
-                                    break;
-                                }
-                            }
-                            if (contact_idx != -1) {
-                                std::snprintf(display_str, sizeof(display_str), "%.15s [Broadcast]: %.90s", contact_list[contact_idx].alias, plaintext);
-                            } else {
-                                bool name_exists = false;
-                                for (int ci = 0; ci < contact_count; ++ci) {
-                                    if (contact_list[ci].active && std::strcmp(contact_list[ci].alias, sender_alias) == 0) {
-                                        name_exists = true;
-                                        break;
-                                    }
-                                }
-                                if (name_exists) {
-                                    std::string fp = public_key_fingerprint(sender_pk_box);
-                                    std::snprintf(display_str, sizeof(display_str), "%.31s_%.4s [BC]: %.84s", sender_alias, fp.c_str(), plaintext);
-                                } else {
-                                    std::snprintf(display_str, sizeof(display_str), "%.31s [BC]: %.89s", sender_alias, plaintext);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (!dec_success) {
-                    std::string hex_epk = bytes_to_hex(p.ephemeral_pk, 4);
-                    std::snprintf(display_str, sizeof(display_str), "[Relayed Encrypted Data: 0x%s...]", hex_epk.c_str());
-                }
-
-                insert_dec_cache(p, display_str);
-            }
-
-            float y = 32.0f + line_offset * 43.0f;
+    if (shown_count == 0) {
+        draw_text(text_buf, "No messages yet", 16, 50, 0.5f, C2D_Color32(150, 156, 162, 255));
+        draw_text(text_buf, "Private and broadcast messages appear here.", 16, 76, 0.36f, C2D_Color32(96, 102, 108, 255));
+    } else {
+        // collected newest-first, so draw the oldest of the batch at the top
+        for (int s = 0; s < shown_count; ++s) {
+            int idx = shown_count - 1 - s;
+            float y = 32.0f + s * 43.0f;
             C2D_DrawRectSolid(10, y, 0.5f, 380, 38, C2D_Color32(20, 22, 30, 200));
             draw_rect_outline(10, y, 380, 38, 1.0f, C2D_Color32(31, 142, 239, 80));
             C2D_DrawRectSolid(10, y, 0.5f, 3, 38, C2D_Color32(31, 142, 239, 255));
-
-            draw_text(text_buf, display_str, 20, y + 11, 0.45f, C2D_Color32(240, 242, 245, 255));
+            draw_text(text_buf, shown[idx], 20, y + 11, 0.45f, C2D_Color32(240, 242, 245, 255));
 
             char nonce_str[32];
-            std::sprintf(nonce_str, "#%lu", (unsigned long)p.nonce);
+            std::snprintf(nonce_str, sizeof(nonce_str), "#%lu", (unsigned long)shown_nonce[idx]);
             draw_text(text_buf, nonce_str, 320, y + 3, 0.35f, C2D_Color32(154, 160, 166, 255));
-
-            line_offset++;
         }
     }
 
