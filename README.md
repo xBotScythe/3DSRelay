@@ -151,7 +151,7 @@ This reads the version from source and produces `3DSRelay.update`.
 Consoles will only accept updates signed by the private key matching the public key hardcoded in the application binary. If you are fork-building the project and want to distribute your own updates:
 
 1. Generate an Ed25519 keypair.
-2. Replace the public key hex values in the `dev_pk_sign` array inside [source/crypto_utils.cpp](file:///Users/noahg/Documents/3dschat/source/crypto_utils.cpp#L707) with your own public key.
+2. Replace the public key hex values in the `dev_pk_sign` array inside [`source/crypto_utils.cpp`](source/crypto_utils.cpp) with your own public key.
 3. Build the application (`make`) and install the new `.cia` on the target consoles.
 4. Pack your updates using your private key:
    ```bash
