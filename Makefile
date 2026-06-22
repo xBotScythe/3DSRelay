@@ -59,7 +59,7 @@ export _3DSXDEPS	:=	$(OUTPUT).smdh
 
 export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 
-.PHONY: all clean update
+.PHONY: all clean update push
 
 all: $(BUILD) $(DEPSDIR)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
@@ -77,6 +77,12 @@ ifndef SIGNING_KEY
 	$(error SIGNING_KEY is not set. pass as arg or env var)
 endif
 	@SIGNING_KEY=$(SIGNING_KEY) python3 pack_update.py
+
+# build + sign, then upload the .update and .cia to a 3ds running ftpd, replacing
+# the staged files on its sd. start ftpd on the 3ds first; ip comes from .3ds_ip
+# or as an argument: make push IP=10.0.0.5
+push: update
+	@python3 push_update.py $(IP)
 
 clean:
 	@echo clean ...
