@@ -655,18 +655,29 @@ bool load_contacts_from_file() {
         return false;
     }
 
-    // block saves until the file reads cleanly so a bad read can't overwrite
-    // recoverable contacts
+    // block saves while a clean read is still possible so a transient bad read
+    // can't overwrite recoverable contacts
     contacts_load_ok = false;
 
     uint32_t magic = 0;
     if (std::fread(&magic, 4, 1, f) != 1) {
         std::fclose(f);
+        // truncated header, undecryptable: start empty but allow fresh saves
+        contact_count = 0;
+        std::memset(contact_list, 0, sizeof(contact_list));
+        contacts_load_ok = true;
         return false;
     }
     if (magic != CONTACTS_MAGIC_V1) {
         std::fclose(f);
-        return load_contacts_legacy();
+        if (load_contacts_legacy()) {
+            return true;
+        }
+        // not a format we can read with this identity: don't keep saves blocked
+        contact_count = 0;
+        std::memset(contact_list, 0, sizeof(contact_list));
+        contacts_load_ok = true;
+        return false;
     }
 
     const size_t body = 4 + sizeof(contact_list);
@@ -677,6 +688,9 @@ bool load_contacts_from_file() {
         std::fread(mac_read, 32, 1, f) != 1 ||
         std::fread(ciphertext, body, 1, f) != 1) {
         std::fclose(f);
+        contact_count = 0;
+        std::memset(contact_list, 0, sizeof(contact_list));
+        contacts_load_ok = true;
         return false;
     }
     std::fclose(f);
@@ -693,6 +707,11 @@ bool load_contacts_from_file() {
     std::memset(&mac, 0, sizeof(mac));
     std::memset(mac_input, 0, sizeof(mac_input));
     if (diff != 0) {
+        // wrong key or stale on-disk layout: unreadable by us, so let new
+        // contacts save instead of silently dropping every add forever
+        contact_count = 0;
+        std::memset(contact_list, 0, sizeof(contact_list));
+        contacts_load_ok = true;
         return false;
     }
 
