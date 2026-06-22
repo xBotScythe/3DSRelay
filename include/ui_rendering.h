@@ -9,7 +9,8 @@ void draw_text(C2D_TextBuf buf, const char* str, float x, float y, float scale, 
 void draw_rect_outline(float x, float y, float w, float h, float thickness, u32 color);
 
 void draw_top_screen_locked(C2D_TextBuf text_buf, int fake_sector);
-void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const char* link_status);
+// ota_state: 0 none, 1 downloading (ota_pct), 2 update staged pending restart
+void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const char* link_status, int ota_state, int ota_pct);
 void clear_decryption_cache();
 void draw_bottom_screen_locked(C2D_TextBuf text_buf, int fake_sector);
 void draw_bottom_screen_menu(C2D_TextBuf text_buf, int selected_item);

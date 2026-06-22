@@ -10,6 +10,11 @@
 #include <3ds.h>
 #include "ui_rendering.h"
 
+// set once a downloaded update is installed; the new title only takes effect on
+// the next launch, so the app keeps running and asks the user to restart
+static bool g_update_pending_restart = false;
+bool update_pending_restart() { return g_update_pending_restart; }
+
 
 void draw_update_notice(C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target, const char* title, const char* body) {
     C2D_TextBufClear(text_buf);
@@ -69,9 +74,10 @@ bool install_cia(const char* cia_path, C2D_TextBuf text_buf, C3D_RenderTarget* b
     if (install_success) {
         res = AM_FinishCiaInstall(ciaInstallHandle);
         if (R_SUCCEEDED(res)) {
-            draw_update_notice(text_buf, bottom_target, "Check for Updates", "Update installed. Closing...");
-            svcSleepThread(2000000000ULL);
-            exit(0);
+            // keep running on the old instance; the new version applies on restart
+            g_update_pending_restart = true;
+            draw_update_notice(text_buf, bottom_target, "Check for Updates", "Update installed. Restart the app to apply.");
+            svcSleepThread(2500000000ULL);
             return true;
         } else {
             char err_msg[128];
@@ -471,21 +477,18 @@ bool check_mesh_for_update(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_Re
     return download_update_windowed(link, manifest, provider_node, text_buf, bottom_target);
 }
 
-void serve_mesh_update_requests(NativeNetworkLink& link) {
-    update_packet_t rx_update;
-    u16 src_node = 0;
-
-    while (link.check_and_pop_update_packet(rx_update, src_node)) {
+// serve a single request packet (manifest query, legacy block, or batch window)
+static void serve_one_update_request(NativeNetworkLink& link, const update_packet_t& rx_update, u16 src_node) {
         // type 0 = legacy single block / manifest query, type 3 = batch window request
         if (rx_update.type != 0 && rx_update.type != 3) {
-            continue;
+            return;
         }
         FILE* serve_f = std::fopen("sdmc:/3ds/3DSRelay.update", "rb");
         if (!serve_f) {
             serve_f = std::fopen("sdmc:/3ds/3DSRelay_ready.update", "rb");
         }
         if (!serve_f) {
-            continue;
+            return;
         }
 
         if (rx_update.type == 0 && rx_update.block_index == 0xFFFFFFFF) {
@@ -528,6 +531,214 @@ void serve_mesh_update_requests(NativeNetworkLink& link) {
             }
         }
         std::fclose(serve_f);
+}
+
+void serve_mesh_update_requests(NativeNetworkLink& link) {
+    update_packet_t rx_update;
+    u16 src_node = 0;
+    while (link.check_and_pop_update_packet(rx_update, src_node)) {
+        serve_one_update_request(link, rx_update, src_node);
+    }
+}
+
+// ---- background mesh updater ----
+// detects a newer version advertised on the mesh and pulls it incrementally from
+// the main loop, so the app stays responsive and the main page can show progress.
+// shares the same partial/bitmap resume files as the manual check.
+
+enum { BG_IDLE = 0, BG_DOWNLOADING = 1, BG_DONE = 2 };
+static int bg_state = BG_IDLE;
+static update_manifest_t bg_manifest;
+static u16 bg_provider = 0;
+static uint8_t* bg_bitmap = NULL;
+static size_t bg_bitmap_bytes = 0;
+static uint32_t bg_total_blocks = 0;
+static uint32_t bg_received = 0;
+static uint32_t bg_received_snapshot = 0;
+static int bg_stall = 0;
+static u64 bg_last_req = 0;
+static u64 bg_last_query = 0;
+
+static const u64 BG_REQUEST_INTERVAL_MS = 600;
+static const u64 BG_QUERY_INTERVAL_MS = 15000;
+static const int BG_STALL_REQUERY = 8;
+static const int BG_STALL_GIVEUP = 40;
+
+static void bg_reset() {
+    if (bg_bitmap) { std::free(bg_bitmap); bg_bitmap = NULL; }
+    bg_state = BG_IDLE;
+    bg_bitmap_bytes = 0;
+    bg_total_blocks = 0;
+    bg_received = 0;
+    bg_received_snapshot = 0;
+    bg_stall = 0;
+}
+
+static void bg_send_query(NativeNetworkLink& link) {
+    (void)link;
+    update_packet_t q;
+    std::memset(&q, 0, sizeof(q));
+    q.type = 0;
+    q.block_index = 0xFFFFFFFF;
+    udsSendTo(UDS_BROADCAST_NETWORKNODEID, 1, UDS_SENDFLAG_Broadcast, &q, sizeof(update_packet_t));
+}
+
+static bool bg_start_download(const update_manifest_t& m, u16 provider) {
+    if (m.file_size == 0 || m.file_size > 10 * 1024 * 1024) {
+        return false;
+    }
+    size_t total_size = 108 + (size_t)m.file_size;
+    bg_total_blocks = (uint32_t)((total_size + UPDATE_BLOCK_SIZE - 1) / UPDATE_BLOCK_SIZE);
+    bg_bitmap_bytes = (bg_total_blocks + 7) / 8;
+    bg_bitmap = (uint8_t*)std::calloc(1, bg_bitmap_bytes);
+    if (!bg_bitmap) {
+        return false;
+    }
+    bg_manifest = m;
+    bg_provider = provider;
+
+    FILE* part = NULL;
+    if (load_resume_state(m, bg_total_blocks, bg_bitmap, bg_bitmap_bytes)) {
+        part = std::fopen(UPDATE_PART_PATH, "r+b");
+    }
+    if (!part) {
+        std::memset(bg_bitmap, 0, bg_bitmap_bytes);
+        part = std::fopen(UPDATE_PART_PATH, "wb+");
+    }
+    if (!part) {
+        std::free(bg_bitmap);
+        bg_bitmap = NULL;
+        return false;
+    }
+    std::fclose(part);
+
+    bg_received = 0;
+    for (uint32_t i = 0; i < bg_total_blocks; ++i) {
+        if (bitmap_get(bg_bitmap, i)) bg_received++;
+    }
+    bg_received_snapshot = bg_received;
+    bg_stall = 0;
+    bg_last_req = 0;
+    bg_state = BG_DOWNLOADING;
+    return true;
+}
+
+void update_on_peer_connect(NativeNetworkLink& link) {
+    // a peer just joined: ask the mesh whether anyone holds a newer version
+    if (bg_state == BG_IDLE && !g_update_pending_restart) {
+        bg_send_query(link);
+        bg_last_query = osGetTime();
+    }
+}
+
+bool background_update_active() {
+    return bg_state != BG_IDLE;
+}
+
+int background_update_percent() {
+    if (bg_state != BG_DOWNLOADING || bg_total_blocks == 0) {
+        return 0;
+    }
+    return (int)(bg_received * 100u / bg_total_blocks);
+}
+
+void background_update_tick(NativeNetworkLink& link, C2D_TextBuf text_buf, C3D_RenderTarget* bottom_target) {
+    u64 now = osGetTime();
+
+    // keep probing while idle so a seeder that arrives after connect is still found;
+    // stop probing once an update is staged and only waiting on a restart
+    if (bg_state == BG_IDLE && !g_update_pending_restart && now - bg_last_query >= BG_QUERY_INTERVAL_MS) {
+        bg_send_query(link);
+        bg_last_query = now;
+    }
+
+    // drain incoming update traffic: serve peer requests, capture replies and blocks
+    FILE* part = (bg_state == BG_DOWNLOADING) ? std::fopen(UPDATE_PART_PATH, "r+b") : NULL;
+    update_packet_t rx;
+    u16 node = 0;
+    while (link.check_and_pop_update_packet(rx, node)) {
+        if (rx.type == 0 || rx.type == 3) {
+            serve_one_update_request(link, rx, node);
+            continue;
+        }
+        if (rx.type != 1) {
+            continue;
+        }
+        if (rx.block_index == 0xFFFFFFFF && rx.length == 108) {
+            update_manifest_t m;
+            std::memcpy(&m, rx.payload, 108);
+            if (m.magic == 0x55504434 && m.version > CURRENT_APP_VERSION &&
+                bg_state == BG_IDLE && !g_update_pending_restart) {
+                if (bg_start_download(m, node)) {
+                    part = std::fopen(UPDATE_PART_PATH, "r+b");
+                }
+            }
+        } else if (bg_state == BG_DOWNLOADING && part &&
+                   rx.block_index < bg_total_blocks && !bitmap_get(bg_bitmap, rx.block_index)) {
+            std::fseek(part, (long)rx.block_index * UPDATE_BLOCK_SIZE, SEEK_SET);
+            if (std::fwrite(rx.payload, 1, rx.length, part) == (size_t)rx.length) {
+                bitmap_mark(bg_bitmap, rx.block_index);
+                bg_received++;
+                bg_provider = node; // lock onto whoever is answering
+            }
+        }
+    }
+    if (part) {
+        std::fflush(part);
+        std::fclose(part);
+        part = NULL;
+    }
+
+    if (bg_state != BG_DOWNLOADING) {
+        return;
+    }
+
+    // complete: promote the partial to the seed file and verify/install
+    if (bg_received >= bg_total_blocks) {
+        std::remove(UPDATE_BITMAP_PATH);
+        std::remove("sdmc:/3ds/3DSRelay_ready.update");
+        if (std::rename(UPDATE_PART_PATH, "sdmc:/3ds/3DSRelay_ready.update") == 0) {
+            bg_state = BG_DONE;
+            // reuses signature + sha-256 checks; installs and exits on success
+            process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
+        }
+        // install failed or was rejected: drop back and let a later pass retry
+        bg_reset();
+        return;
+    }
+
+    // pace window requests; re-acquire a seeder if progress stalls
+    if (now - bg_last_req >= BG_REQUEST_INTERVAL_MS) {
+        if (bg_received == bg_received_snapshot) {
+            bg_stall++;
+        } else {
+            bg_stall = 0;
+            bg_received_snapshot = bg_received;
+        }
+        if (bg_stall == BG_STALL_REQUERY) {
+            bg_send_query(link); // pull in any other seeder for the same version
+        }
+        if (bg_stall >= BG_STALL_GIVEUP) {
+            // sustained stall: stop this session, partial + bitmap remain for resume
+            save_resume_state(bg_manifest, bg_total_blocks, bg_bitmap, bg_bitmap_bytes);
+            bg_reset();
+            return;
+        }
+
+        uint32_t start = 0;
+        while (start < bg_total_blocks && bitmap_get(bg_bitmap, start)) start++;
+        if (start < bg_total_blocks) {
+            uint32_t count = UPDATE_WINDOW_BLOCKS;
+            if (start + count > bg_total_blocks) count = bg_total_blocks - start;
+            update_packet_t req;
+            std::memset(&req, 0, sizeof(req));
+            req.type = 3;
+            req.block_index = start;
+            req.length = count;
+            udsSendTo(bg_provider, 1, UDS_SENDFLAG_Default, &req, sizeof(update_packet_t));
+            save_resume_state(bg_manifest, bg_total_blocks, bg_bitmap, bg_bitmap_bytes);
+        }
+        bg_last_req = now;
     }
 }
 

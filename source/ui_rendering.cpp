@@ -153,7 +153,7 @@ static bool build_message_display(const packet_t& p, char* out, size_t out_len) 
     return show;
 }
 
-void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const char* link_status) {
+void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const char* link_status, int ota_state, int ota_pct) {
     // top screen header bar disguised as a diagnostics tool
     C2D_DrawRectSolid(0, 0, 0.5f, 400, 28, C2D_Color32(26, 27, 38, 255));
     draw_text(text_buf, "FAT32 Diagnostics Console", 12, 6, 0.55f, C2D_Color32(0, 255, 210, 255));
@@ -210,11 +210,30 @@ void draw_top_screen(C2D_TextBuf text_buf, const PacketRingBuffer& buffer, const
     } else if (std::strstr(link_status, "error") || std::strstr(link_status, "failed")) {
         status_dot_color = C2D_Color32(255, 82, 82, 255);
     }
+    // a staged update takes over the bar so the user is told to restart
+    if (ota_state == 2) {
+        C2D_DrawRectSolid(12, 222, 0.5f, 8, 8, C2D_Color32(82, 255, 120, 255));
+        draw_text(text_buf, "Update installed - restart to apply", 26, 218, 0.42f, C2D_Color32(120, 255, 150, 255));
+        return;
+    }
+
     C2D_DrawRectSolid(12, 222, 0.5f, 8, 8, status_dot_color);
 
     char status_line[128];
     std::sprintf(status_line, "Status: %s", link_status);
     draw_text(text_buf, status_line, 26, 218, 0.42f, C2D_Color32(240, 242, 245, 255));
+
+    // compact OTA download icon + percentage at the right of the bar
+    if (ota_state == 1) {
+        // small down-arrow icon drawn as a stacked block + chevron
+        C2D_DrawRectSolid(330, 219, 0.6f, 4, 7, C2D_Color32(0, 220, 255, 255));
+        C2D_DrawTriangle(327, 226, C2D_Color32(0, 220, 255, 255),
+                         337, 226, C2D_Color32(0, 220, 255, 255),
+                         332, 232, C2D_Color32(0, 220, 255, 255), 0.6f);
+        char ota_line[16];
+        std::snprintf(ota_line, sizeof(ota_line), "%d%%", ota_pct);
+        draw_text(text_buf, ota_line, 344, 218, 0.42f, C2D_Color32(0, 220, 255, 255));
+    }
 }
 
 void draw_bottom_screen_locked(C2D_TextBuf text_buf, int fake_sector) {

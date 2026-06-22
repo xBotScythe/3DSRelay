@@ -157,6 +157,8 @@ int main(int argc, char* argv[]) {
     size_t prev_buffer_size = 999999;
     int frame_counter = 0;
     bool force_redraw = true;
+    bool was_connected = false; // tracks link transitions to trigger an update probe
+    bool prev_pending_restart = false; // edge-detects update completion for a redraw
     char prev_link_status[128] = "";
     int selected_menu_item = 0;
     int app_state = 0; // 0 = main menu, 1 = pattern setup, 2 = settings, 3 = show pk, 4 = select recipient, 5 = add contact, 6 = incoming request
@@ -247,11 +249,14 @@ int main(int argc, char* argv[]) {
                         load_contacts_from_file();
                         buffer.load_from_file("sdmc:/3ds/3dsrelay.packets", atrest_enc, atrest_mac);
 
-                        // auto-install signed update packages if present
-                        if (should_process_update("sdmc:/3ds/3DSRelay.update", CURRENT_APP_VERSION)) {
-                            process_local_update_file("sdmc:/3ds/3DSRelay.update", text_buf, bottom_target);
-                        } else if (should_process_update("sdmc:/3ds/3DSRelay_ready.update", CURRENT_APP_VERSION)) {
-                            process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
+                        // auto-install signed update packages if present (skip once
+                        // an update is already staged and only waiting on a restart)
+                        if (!update_pending_restart()) {
+                            if (should_process_update("sdmc:/3ds/3DSRelay.update", CURRENT_APP_VERSION)) {
+                                process_local_update_file("sdmc:/3ds/3DSRelay.update", text_buf, bottom_target);
+                            } else if (should_process_update("sdmc:/3ds/3DSRelay_ready.update", CURRENT_APP_VERSION)) {
+                                process_local_update_file("sdmc:/3ds/3DSRelay_ready.update", text_buf, bottom_target);
+                            }
                         }
                     } else {
                         system_unlocked = false;
@@ -686,15 +691,30 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Handle UDS update port serving in main loop
-        if (link.is_connected()) {
-            serve_mesh_update_requests(link);
+        // serve peers and run the background updater while connected; probe the
+        // mesh for a newer version the moment a peer connects
+        bool now_connected = link.is_connected();
+        if (now_connected && !was_connected) {
+            update_on_peer_connect(link);
+        }
+        was_connected = now_connected;
+        if (now_connected) {
+            background_update_tick(link, text_buf, bottom_target);
         } else {
             cleanup_mesh_update_port();
         }
+        // keep the screen refreshing so the download percentage stays live, and
+        // force one redraw when an update finishes so the restart notice appears
+        if (background_update_active()) {
+            force_redraw = true;
+        }
+        if (update_pending_restart() && !prev_pending_restart) {
+            force_redraw = true;
+        }
+        prev_pending_restart = update_pending_restart();
 
         // periodic check for background-downloaded updates
-        if (system_unlocked && keys_derived) {
+        if (system_unlocked && keys_derived && !update_pending_restart()) {
             u64 now_uc = osGetTime();
             if (now_uc - last_update_check >= UPDATE_CHECK_INTERVAL_MS) {
                 last_update_check = now_uc;
@@ -750,7 +770,14 @@ int main(int argc, char* argv[]) {
                 if (!system_unlocked) {
                     draw_top_screen_locked(text_buf, fake_sector);
                 } else {
-                    draw_top_screen(text_buf, buffer, current_link_status);
+                    int ota_state = 0, ota_pct = 0;
+                    if (update_pending_restart()) {
+                        ota_state = 2;
+                    } else if (background_update_active()) {
+                        ota_state = 1;
+                        ota_pct = background_update_percent();
+                    }
+                    draw_top_screen(text_buf, buffer, current_link_status, ota_state, ota_pct);
                 }
 
                 // bottom screen graphics scene
